@@ -1,0 +1,40 @@
+default: "mock"
+
+providers:
+  - name: "mock"
+    default_model: "companion-mock-v1"
+    models:
+      - "companion-mock-v1"
+
+  - name: "ollama"
+    base_url: "http://localhost:11434/v1"
+    default_model: "qwen2.5-coder:7b"
+    models:
+      - "qwen2.5-coder:7b"
+      - "llama3.1"
+      - "deepseek-coder"
+
+  - name: "groq"
+    api_key: "${GROQ_API_KEY}"
+    base_url: "https://api.groq.com/openai/v1"
+    default_model: "openai/gpt-oss-120b"
+    models:
+      - "openai/gpt-oss-120b"
+      - "llama-3.3-70b-versatile"
+      - "llama-3.1-8b-instant"
+
+  - name: "openai"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    default_model: "gpt-4o-mini"
+    models:
+      - "gpt-4o-mini"
+      - "gpt-4o"
+
+  - name: "siliconflow"
+    api_key: "${SILICONFLOW_API_KEY}"
+    base_url: "https://api.siliconflow.cn/v1"
+    default_model: "Qwen/Qwen2.5-72B-Instruct"
+    models:
+      - "Qwen/Qwen2.5-72B-Instruct"
+      - "deepseek-ai/DeepSeek-V2.5"
