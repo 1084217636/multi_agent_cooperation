@@ -72,6 +72,42 @@ func (s *Service) persistRuntimeState() {
 	}
 }
 
+func (s *Service) restoreRuntimeState(ctx context.Context) {
+	if s.store == nil {
+		return
+	}
+
+	var workflow WorkflowState
+	if err := s.store.LoadJSON(ctx, "workflow", &workflow); err == nil && !workflow.UpdatedAt.IsZero() {
+		s.mu.Lock()
+		s.workflow = workflow
+		s.mu.Unlock()
+	}
+
+	var screen ScreenContext
+	if err := s.store.LoadJSON(ctx, "screen", &screen); err == nil && (screen.Available || screen.ImagePath != "" || screen.CaptureCount > 0) {
+		s.mu.Lock()
+		s.screen = screen
+		s.mu.Unlock()
+	}
+
+	var latest RunReport
+	if err := s.store.LoadJSON(ctx, "latest_run", &latest); err == nil && latest.ID != "" {
+		s.mu.Lock()
+		exists := false
+		for _, run := range s.runs {
+			if run.ID == latest.ID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			s.runs = append([]*RunReport{&latest}, s.runs...)
+		}
+		s.mu.Unlock()
+	}
+}
+
 func (s *Service) ensureScreenAnalysis(ctx context.Context, screen ScreenContext) ScreenContext {
 	if !screen.Available || s.vision == nil || strings.TrimSpace(screen.ImagePath) == "" {
 		return screen

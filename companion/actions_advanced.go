@@ -11,9 +11,12 @@ import (
 	"multi_agent_cooperation/preflight"
 )
 
-func (s *Service) performDockerSelfHealAction() actionOutcome {
+func (s *Service) performDockerSelfHealAction(workdir string, targets []string) actionOutcome {
 	started := time.Now()
-	output, err := s.runDockerSelfHeal()
+	if strings.TrimSpace(workdir) == "" {
+		workdir = s.root
+	}
+	output, err := s.runDockerSelfHeal(workdir, targets)
 	status := "completed"
 	summary := "Docker 自愈执行闭环完成"
 	if err != nil {
@@ -22,7 +25,7 @@ func (s *Service) performDockerSelfHealAction() actionOutcome {
 		output = trimActionOutput(output + "\n" + err.Error())
 	}
 
-	report := preflight.Run(context.Background(), s.root)
+	report := preflight.RunWithTargets(context.Background(), workdir, targets)
 	if hasPreflightFailure(report) {
 		status = "failed"
 		if err == nil {
@@ -45,9 +48,12 @@ func (s *Service) performDockerSelfHealAction() actionOutcome {
 	}
 }
 
-func (s *Service) performAutoFixCommitAction(ctx context.Context) actionOutcome {
+func (s *Service) performAutoFixCommitAction(ctx context.Context, workdir string, targets []string) actionOutcome {
 	started := time.Now()
-	output, err := s.runLocalAutoFix(ctx)
+	if strings.TrimSpace(workdir) == "" {
+		workdir = s.root
+	}
+	output, err := s.runLocalAutoFix(ctx, workdir, targets)
 	status := "completed"
 	summary := "自动修复与自检完成"
 	if err != nil {
@@ -55,7 +61,7 @@ func (s *Service) performAutoFixCommitAction(ctx context.Context) actionOutcome 
 		summary = "自动修复失败"
 	}
 
-	report := preflight.Run(context.Background(), s.root)
+	report := preflight.RunWithTargets(context.Background(), workdir, targets)
 	if hasPreflightFailure(report) {
 		status = "failed"
 		if err == nil {
@@ -78,27 +84,33 @@ func (s *Service) performAutoFixCommitAction(ctx context.Context) actionOutcome 
 	}
 }
 
-func (s *Service) runDockerSelfHeal() (string, error) {
+func (s *Service) runDockerSelfHeal(workdir string, targets []string) (string, error) {
+	scope := strings.Join(validationArgs(targets), " ")
 	script := `
 set -u
+export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export GOTOOLCHAIN=local
 echo "[self-heal] initial go test"
-if go test ./...; then
+if /usr/local/go/bin/go test ` + scope + `; then
   echo "[self-heal] initial check passed"
 else
   echo "[self-heal] running go mod tidy"
-  go mod tidy || true
+  /usr/local/go/bin/go mod tidy || true
   echo "[self-heal] running gofmt"
-  find . -path './.git' -prune -o -path './data' -prune -o -path './node_modules' -prune -o -name '*.go' -exec gofmt -w {} +
+  find . -path './.git' -prune -o -path './data' -prune -o -path './node_modules' -prune -o -name '*.go' -exec /usr/local/go/bin/gofmt -w {} +
+  if command -v goimports >/dev/null 2>&1; then
+    echo "[self-heal] running goimports"
+    find . -path './.git' -prune -o -path './data' -prune -o -path './node_modules' -prune -o -name '*.go' -exec goimports -w {} +
+  fi
   echo "[self-heal] rerunning go test"
-  go test ./... || exit 1
+  /usr/local/go/bin/go test ` + scope + ` || exit 1
 fi
 echo "[self-heal] go vet"
-go vet ./...
+/usr/local/go/bin/go vet ` + scope + `
 `
 
 	cmd := exec.Command("docker", "run", "--rm",
-		"-v", s.root+":/workspace",
+		"-v", workdir+":/workspace",
 		"-w", "/workspace",
 		"golang:1.25",
 		"sh", "-lc", script,
@@ -107,10 +119,11 @@ go vet ./...
 	return string(output), err
 }
 
-func (s *Service) runLocalAutoFix(ctx context.Context) (string, error) {
+func (s *Service) runLocalAutoFix(ctx context.Context, workdir string, targets []string) (string, error) {
 	var outputParts []string
+	targetArgs := validationArgs(targets)
 
-	goFiles, err := collectGoFiles(s.root)
+	goFiles, err := collectGoFiles(workdir)
 	if err != nil {
 		return "", err
 	}
@@ -120,16 +133,28 @@ func (s *Service) runLocalAutoFix(ctx context.Context) (string, error) {
 			return "", pathErr
 		}
 		cmd := exec.CommandContext(ctx, gofmtPath, append([]string{"-w"}, goFiles...)...)
-		cmd.Dir = s.root
+		cmd.Dir = workdir
 		formatted, fmtErr := cmd.CombinedOutput()
 		outputParts = append(outputParts, "[gofmt]\n"+string(formatted))
 		if fmtErr != nil {
 			return strings.Join(outputParts, "\n"), fmtErr
 		}
+
+		if goimportsPath, lookErr := exec.LookPath("goimports"); lookErr == nil {
+			goimportsCmd := exec.CommandContext(ctx, goimportsPath, append([]string{"-w"}, goFiles...)...)
+			goimportsCmd.Dir = workdir
+			goimportsOut, goimportsErr := goimportsCmd.CombinedOutput()
+			outputParts = append(outputParts, "[goimports]\n"+string(goimportsOut))
+			if goimportsErr != nil {
+				return strings.Join(outputParts, "\n"), goimportsErr
+			}
+		} else {
+			outputParts = append(outputParts, "[goimports]\nnot installed, skipped")
+		}
 	}
 
 	tidyCmd := exec.CommandContext(ctx, "go", "mod", "tidy")
-	tidyCmd.Dir = s.root
+	tidyCmd.Dir = workdir
 	tidyCmd.Env = append(tidyCmd.Environ(), "GOTOOLCHAIN=local")
 	tidyOut, tidyErr := tidyCmd.CombinedOutput()
 	outputParts = append(outputParts, "[go mod tidy]\n"+string(tidyOut))
@@ -137,13 +162,43 @@ func (s *Service) runLocalAutoFix(ctx context.Context) (string, error) {
 		return strings.Join(outputParts, "\n"), tidyErr
 	}
 
-	if isGitRepository(s.root) {
+	testCmd := exec.CommandContext(ctx, "go", append([]string{"test"}, targetArgs...)...)
+	testCmd.Dir = workdir
+	testCmd.Env = append(testCmd.Environ(), "GOTOOLCHAIN=local")
+	testOut, testErr := testCmd.CombinedOutput()
+	outputParts = append(outputParts, "[go test]\n"+string(testOut))
+	if testErr != nil {
+		return strings.Join(outputParts, "\n"), testErr
+	}
+
+	vetCmd := exec.CommandContext(ctx, "go", append([]string{"vet"}, targetArgs...)...)
+	vetCmd.Dir = workdir
+	vetCmd.Env = append(vetCmd.Environ(), "GOTOOLCHAIN=local")
+	vetOut, vetErr := vetCmd.CombinedOutput()
+	outputParts = append(outputParts, "[go vet]\n"+string(vetOut))
+	if vetErr != nil {
+		return strings.Join(outputParts, "\n"), vetErr
+	}
+
+	if golangciLintPath, lookErr := exec.LookPath("golangci-lint"); lookErr == nil {
+		lintCmd := exec.CommandContext(ctx, golangciLintPath, append([]string{"run"}, targetArgs...)...)
+		lintCmd.Dir = workdir
+		lintOut, lintErr := lintCmd.CombinedOutput()
+		outputParts = append(outputParts, "[golangci-lint]\n"+string(lintOut))
+		if lintErr != nil {
+			return strings.Join(outputParts, "\n"), lintErr
+		}
+	} else {
+		outputParts = append(outputParts, "[golangci-lint]\nnot installed, skipped")
+	}
+
+	if isGitRepository(workdir) {
 		statusCmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
-		statusCmd.Dir = s.root
+		statusCmd.Dir = workdir
 		statusOut, statusErr := statusCmd.CombinedOutput()
 		if statusErr == nil && strings.TrimSpace(string(statusOut)) != "" {
 			addCmd := exec.CommandContext(ctx, "git", "add", "-A")
-			addCmd.Dir = s.root
+			addCmd.Dir = workdir
 			addOut, addErr := addCmd.CombinedOutput()
 			outputParts = append(outputParts, "[git add]\n"+string(addOut))
 			if addErr != nil {
@@ -151,7 +206,7 @@ func (s *Service) runLocalAutoFix(ctx context.Context) (string, error) {
 			}
 
 			commitCmd := exec.CommandContext(ctx, "git", "commit", "-m", "chore: auto-fix workspace")
-			commitCmd.Dir = s.root
+			commitCmd.Dir = workdir
 			commitOut, commitErr := commitCmd.CombinedOutput()
 			outputParts = append(outputParts, "[git commit]\n"+string(commitOut))
 			if commitErr != nil {
@@ -175,7 +230,7 @@ func collectGoFiles(root string) ([]string, error) {
 		}
 		if info.IsDir() {
 			name := info.Name()
-			if name == ".git" || name == "data" || name == "node_modules" || name == "bin" {
+			if name == ".git" || name == "data" || name == "node_modules" || name == "bin" || name == "workspace_runs" {
 				return filepath.SkipDir
 			}
 			return nil

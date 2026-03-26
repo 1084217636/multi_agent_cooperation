@@ -28,9 +28,12 @@
 - 为 README、配置、设计文档和历史运行结果建立轻量 RAG 索引
 - 运行 `go test`、`go vet`、`goimports`/`golangci-lint` 可用性检查
 - 记录执行前后快照，生成差异、回滚建议和结构化排障报告
+- 按目标包范围执行预检、自动修复和 Docker 验证，而不是始终全仓跑 `./...`
 - 导出 Markdown 报告、JSON 运行结果和交付文档
+- 保留 raw model response、preflight.json、repair_rounds.json、sandbox.log 等留痕工件
 - 在需要时执行 Docker 自愈、重新预检、自动修复和快照回滚动作
-- 可选接入 LangGraph HTTP bridge、Redis 状态存储和屏幕上下文采集
+- 可选接入 LangGraph 阶段编排后端，支持把 `planning + codegen` 节点委托给外部图服务
+- Redis 状态恢复和屏幕上下文采集
 
 ## 快速开始
 
@@ -80,21 +83,24 @@ GOTOOLCHAIN=local go test ./...
 - Docker 自愈动作：[companion/actions_advanced.go](/home/root1/go_learn/multi_agent_cooperation/companion/actions_advanced.go)
 - 快照与回滚：[snapshot/manifest.go](/home/root1/go_learn/multi_agent_cooperation/snapshot/manifest.go)
 - Redis 状态存储：[companion/redis_store.go](/home/root1/go_learn/multi_agent_cooperation/companion/redis_store.go)
-- LangGraph bridge：[companion/langgraph_bridge.go](/home/root1/go_learn/multi_agent_cooperation/companion/langgraph_bridge.go)
+- LangGraph 阶段编排桥接：[companion/langgraph_bridge.go](/home/root1/go_learn/multi_agent_cooperation/companion/langgraph_bridge.go)
 
 ## 文档
 
 - 项目教学文档：[PROJECT_TEACHING_GUIDE.md](/home/root1/go_learn/multi_agent_cooperation/PROJECT_TEACHING_GUIDE.md)
+- 学习地图：[LEARNING_MAP.md](/home/root1/go_learn/multi_agent_cooperation/LEARNING_MAP.md)
+- 术语表：[TERM_GLOSSARY.md](/home/root1/go_learn/multi_agent_cooperation/TERM_GLOSSARY.md)
 - 使用文档：[docs/USAGE.md](/home/root1/go_learn/multi_agent_cooperation/docs/USAGE.md)
 - 配置文档：[docs/CONFIGURATION.md](/home/root1/go_learn/multi_agent_cooperation/docs/CONFIGURATION.md)
+- 测试文档：[docs/TESTING_GUIDE.md](/home/root1/go_learn/multi_agent_cooperation/docs/TESTING_GUIDE.md)
 - LangGraph 取舍说明：[docs/LANGGRAPH_DECISION.md](/home/root1/go_learn/multi_agent_cooperation/docs/LANGGRAPH_DECISION.md)
 - Provider 说明：[LLM_PROVIDER_GUIDE.md](/home/root1/go_learn/multi_agent_cooperation/LLM_PROVIDER_GUIDE.md)
 
 ## 当前边界
 
 - 这版最强的是“分析、预检、导出、回滚建议”，不是完整的自动写代码主链
-- LangGraph 目前是可选 bridge，不是默认运行时
-- Redis 目前是状态存储层，不是复杂调度内核
+- LangGraph 目前已能接管 `planning + codegen` 两个核心节点，但仍是外部 HTTP 图后端，不是本地单进程图运行时
+- Redis 目前已承担最近任务 / workflow / screen 恢复，但不是完整的调度内核
 - 屏幕上下文是可选辅助能力，不是项目主卖点
 
 ## 安全边界

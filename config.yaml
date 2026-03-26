@@ -11,13 +11,15 @@ runtime:
   enable_rag: true
   enable_preflight: true
   enable_docker: true
+  enable_docker_validation: true
   enable_snapshots: true
   enable_sandbox_smoke: false
+  auto_repair_rounds: 2
   max_knowledge_results: 4
   provider_timeout_sec: 20
 
 workflow:
-  backend: "builtin"
+  backend: "auto"
   langgraph_endpoint: ""
   langgraph_timeout_sec: 25
 

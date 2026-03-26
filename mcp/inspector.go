@@ -7,69 +7,89 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
-// CodeInfo 代码信息
+// CodeInfo 汇总项目中的静态结构信息。
 type CodeInfo struct {
 	Functions []FunctionInfo
 	Structs   []StructInfo
 	Packages  []string
+	Imports   []ImportInfo
+	Calls     []CallEdgeInfo
 }
 
-// FunctionInfo 函数信息
+// FunctionInfo 描述函数定义。
 type FunctionInfo struct {
-	Name        string
-	Package     string
-	File        string
-	Signature   string
-	Comment     string
-	Line        int
-}
-
-// StructInfo 结构体信息
-type StructInfo struct {
 	Name      string
 	Package   string
 	File      string
-	Fields    []FieldInfo
+	Signature string
 	Comment   string
 	Line      int
 }
 
-// FieldInfo 字段信息
+// StructInfo 描述结构体定义。
+type StructInfo struct {
+	Name    string
+	Package string
+	File    string
+	Fields  []FieldInfo
+	Comment string
+	Line    int
+}
+
+// FieldInfo 描述结构体字段。
 type FieldInfo struct {
 	Name    string
 	Type    string
 	Comment string
 }
 
-// Inspector 代码检查器
+// ImportInfo 描述单个 import 声明。
+type ImportInfo struct {
+	Path    string
+	Alias   string
+	Package string
+	File    string
+}
+
+// CallEdgeInfo 描述一条基础调用边。
+type CallEdgeInfo struct {
+	Caller  string
+	Callee  string
+	Package string
+	File    string
+	Line    int
+}
+
+// Inspector 负责扫描项目静态结构。
 type Inspector struct {
 	rootDir string
 }
 
-// NewInspector 创建代码检查器
+// NewInspector 创建代码检查器。
 func NewInspector(rootDir string) *Inspector {
 	return &Inspector{rootDir: rootDir}
 }
 
-// ScanProject 扫描项目代码
+// ScanProject 扫描项目代码。
 func (i *Inspector) ScanProject() (*CodeInfo, error) {
 	var codeInfo CodeInfo
 	packages := make(map[string]bool)
+	importSeen := make(map[string]bool)
+	callSeen := make(map[string]bool)
 
-	err := filepath.Walk(i.rootDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	err := filepath.Walk(i.rootDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
 
-		// 跳过隐藏目录
 		if info.IsDir() && strings.HasPrefix(info.Name(), ".") {
 			return filepath.SkipDir
 		}
 
-		// 只处理.go文件
 		if !info.IsDir() && strings.HasSuffix(path, ".go") {
 			fileInfo, pkgName, err := i.analyzeFile(path)
 			if err != nil {
@@ -82,24 +102,38 @@ func (i *Inspector) ScanProject() (*CodeInfo, error) {
 
 			codeInfo.Functions = append(codeInfo.Functions, fileInfo.Functions...)
 			codeInfo.Structs = append(codeInfo.Structs, fileInfo.Structs...)
+			for _, item := range fileInfo.Imports {
+				key := item.Package + "|" + item.File + "|" + item.Path + "|" + item.Alias
+				if importSeen[key] {
+					continue
+				}
+				importSeen[key] = true
+				codeInfo.Imports = append(codeInfo.Imports, item)
+			}
+			for _, item := range fileInfo.Calls {
+				key := item.Caller + "|" + item.Callee + "|" + item.File + fmt.Sprintf("|%d", item.Line)
+				if callSeen[key] {
+					continue
+				}
+				callSeen[key] = true
+				codeInfo.Calls = append(codeInfo.Calls, item)
+			}
 		}
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan project: %w", err)
 	}
 
-	// 转换包名映射为切片
 	for pkg := range packages {
 		codeInfo.Packages = append(codeInfo.Packages, pkg)
 	}
+	sort.Strings(codeInfo.Packages)
 
 	return &codeInfo, nil
 }
 
-// analyzeFile 分析单个文件
 func (i *Inspector) analyzeFile(filePath string) (*CodeInfo, string, error) {
 	fset := token.NewFileSet()
 	node, err := parser.ParseFile(fset, filePath, nil, parser.ParseComments)
@@ -109,13 +143,14 @@ func (i *Inspector) analyzeFile(filePath string) (*CodeInfo, string, error) {
 
 	var codeInfo CodeInfo
 	pkgName := node.Name.Name
+	codeInfo.Imports = i.extractImports(node, filePath, pkgName)
 
-	// 遍历文件中的所有声明
 	for _, decl := range node.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
 			funcInfo := i.extractFunctionInfo(d, fset, filePath, pkgName)
 			codeInfo.Functions = append(codeInfo.Functions, funcInfo)
+			codeInfo.Calls = append(codeInfo.Calls, i.extractCallEdges(d, fset, filePath, pkgName)...)
 		case *ast.GenDecl:
 			if d.Tok == token.TYPE {
 				for _, spec := range d.Specs {
@@ -133,53 +168,110 @@ func (i *Inspector) analyzeFile(filePath string) (*CodeInfo, string, error) {
 	return &codeInfo, pkgName, nil
 }
 
-// extractFunctionInfo 提取函数信息
+func (i *Inspector) extractImports(node *ast.File, filePath, pkgName string) []ImportInfo {
+	var imports []ImportInfo
+	for _, spec := range node.Imports {
+		importInfo := ImportInfo{
+			Path:    strings.Trim(spec.Path.Value, `"`),
+			Package: pkgName,
+			File:    filepath.Base(filePath),
+		}
+		if spec.Name != nil {
+			importInfo.Alias = spec.Name.Name
+		}
+		imports = append(imports, importInfo)
+	}
+	return imports
+}
+
 func (i *Inspector) extractFunctionInfo(funcDecl *ast.FuncDecl, fset *token.FileSet, filePath, pkgName string) FunctionInfo {
 	var comment string
 	if funcDecl.Doc != nil {
 		comment = funcDecl.Doc.Text()
 	}
 
-	signature := i.formatFunctionSignature(funcDecl)
-
 	return FunctionInfo{
 		Name:      funcDecl.Name.Name,
 		Package:   pkgName,
 		File:      filepath.Base(filePath),
-		Signature: signature,
+		Signature: i.formatFunctionSignature(funcDecl),
 		Comment:   comment,
 		Line:      fset.Position(funcDecl.Pos()).Line,
 	}
 }
 
-// formatFunctionSignature 格式化函数签名
+func (i *Inspector) extractCallEdges(funcDecl *ast.FuncDecl, fset *token.FileSet, filePath, pkgName string) []CallEdgeInfo {
+	if funcDecl.Body == nil {
+		return nil
+	}
+
+	caller := i.functionDisplayName(funcDecl, pkgName)
+	var edges []CallEdgeInfo
+	ast.Inspect(funcDecl.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+
+		callee := i.formatCallTarget(call.Fun)
+		if callee == "" {
+			return true
+		}
+
+		edges = append(edges, CallEdgeInfo{
+			Caller:  caller,
+			Callee:  callee,
+			Package: pkgName,
+			File:    filepath.Base(filePath),
+			Line:    fset.Position(call.Pos()).Line,
+		})
+		return true
+	})
+	return edges
+}
+
+func (i *Inspector) functionDisplayName(funcDecl *ast.FuncDecl, pkgName string) string {
+	if funcDecl.Recv == nil || len(funcDecl.Recv.List) == 0 {
+		return pkgName + "." + funcDecl.Name.Name
+	}
+	recv := strings.TrimPrefix(i.formatType(funcDecl.Recv.List[0].Type), "*")
+	return pkgName + "." + recv + "." + funcDecl.Name.Name
+}
+
+func (i *Inspector) formatCallTarget(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.SelectorExpr:
+		return i.formatType(t.X) + "." + t.Sel.Name
+	case *ast.IndexExpr:
+		return i.formatCallTarget(t.X)
+	case *ast.IndexListExpr:
+		return i.formatCallTarget(t.X)
+	default:
+		return ""
+	}
+}
+
 func (i *Inspector) formatFunctionSignature(funcDecl *ast.FuncDecl) string {
 	var parts []string
 
-	// 接收者
 	if funcDecl.Recv != nil {
-		recvStr := i.formatFieldList(funcDecl.Recv)
-		parts = append(parts, recvStr+" ")
+		parts = append(parts, i.formatFieldList(funcDecl.Recv)+" ")
 	}
 
-	// 函数名
 	parts = append(parts, funcDecl.Name.Name)
-
-	// 参数
 	parts = append(parts, "(")
 	if funcDecl.Type.Params != nil {
 		parts = append(parts, i.formatFieldList(funcDecl.Type.Params))
 	}
 	parts = append(parts, ")")
 
-	// 返回值
 	if funcDecl.Type.Results != nil {
 		if len(funcDecl.Type.Results.List) == 1 && funcDecl.Type.Results.List[0].Names == nil {
-			// 单个无名称返回值
 			parts = append(parts, " ")
 			parts = append(parts, i.formatType(funcDecl.Type.Results.List[0].Type))
 		} else {
-			// 多个返回值或有名称的返回值
 			parts = append(parts, " (")
 			parts = append(parts, i.formatFieldList(funcDecl.Type.Results))
 			parts = append(parts, ")")
@@ -189,7 +281,6 @@ func (i *Inspector) formatFunctionSignature(funcDecl *ast.FuncDecl) string {
 	return strings.Join(parts, "")
 }
 
-// extractStructInfo 提取结构体信息
 func (i *Inspector) extractStructInfo(ts *ast.TypeSpec, structType *ast.StructType, fset *token.FileSet, filePath, pkgName string) StructInfo {
 	var comment string
 	if ts.Doc != nil {
@@ -199,8 +290,7 @@ func (i *Inspector) extractStructInfo(ts *ast.TypeSpec, structType *ast.StructTy
 	var fields []FieldInfo
 	if structType.Fields != nil {
 		for _, field := range structType.Fields.List {
-			fieldInfo := i.extractFieldInfo(field)
-			fields = append(fields, fieldInfo...)
+			fields = append(fields, i.extractFieldInfo(field)...)
 		}
 	}
 
@@ -214,40 +304,32 @@ func (i *Inspector) extractStructInfo(ts *ast.TypeSpec, structType *ast.StructTy
 	}
 }
 
-// extractFieldInfo 提取字段信息
 func (i *Inspector) extractFieldInfo(field *ast.Field) []FieldInfo {
 	var fieldInfos []FieldInfo
 
 	if field.Names == nil {
-		// 嵌入字段
+		fieldInfo := FieldInfo{Name: i.formatType(field.Type)}
+		if field.Doc != nil {
+			fieldInfo.Comment = field.Doc.Text()
+		}
+		fieldInfos = append(fieldInfos, fieldInfo)
+		return fieldInfos
+	}
+
+	for _, name := range field.Names {
 		fieldInfo := FieldInfo{
-			Name:    i.formatType(field.Type),
-			Type:    "",
-			Comment: "",
+			Name: name.Name,
+			Type: i.formatType(field.Type),
 		}
 		if field.Doc != nil {
 			fieldInfo.Comment = field.Doc.Text()
 		}
 		fieldInfos = append(fieldInfos, fieldInfo)
-	} else {
-		// 普通字段
-		for _, name := range field.Names {
-			fieldInfo := FieldInfo{
-				Name:    name.Name,
-				Type:    i.formatType(field.Type),
-				Comment: "",
-			}
-			if field.Doc != nil {
-				fieldInfo.Comment = field.Doc.Text()
-			}
-			fieldInfos = append(fieldInfos, fieldInfo)
-		}
 	}
 
 	return fieldInfos
 }
 
-// formatFieldList 格式化字段列表
 func (i *Inspector) formatFieldList(fieldList *ast.FieldList) string {
 	if fieldList == nil {
 		return ""
@@ -258,26 +340,23 @@ func (i *Inspector) formatFieldList(fieldList *ast.FieldList) string {
 		if j > 0 {
 			parts = append(parts, ", ")
 		}
-
 		if field.Names == nil {
-			// 嵌入字段
 			parts = append(parts, i.formatType(field.Type))
-		} else {
-			// 普通字段
-			var names []string
-			for _, name := range field.Names {
-				names = append(names, name.Name)
-			}
-			parts = append(parts, strings.Join(names, ", "))
-			parts = append(parts, " ")
-			parts = append(parts, i.formatType(field.Type))
+			continue
 		}
+
+		var names []string
+		for _, name := range field.Names {
+			names = append(names, name.Name)
+		}
+		parts = append(parts, strings.Join(names, ", "))
+		parts = append(parts, " ")
+		parts = append(parts, i.formatType(field.Type))
 	}
 
 	return strings.Join(parts, "")
 }
 
-// formatType 格式化类型
 func (i *Inspector) formatType(expr ast.Expr) string {
 	switch t := expr.(type) {
 	case *ast.Ident:
@@ -328,7 +407,7 @@ func (i *Inspector) formatType(expr ast.Expr) string {
 	}
 }
 
-// GenerateSystemPrompt 生成系统提示
+// GenerateSystemPrompt 生成静态结构提示。
 func (i *Inspector) GenerateSystemPrompt() (string, error) {
 	codeInfo, err := i.ScanProject()
 	if err != nil {
@@ -338,7 +417,6 @@ func (i *Inspector) GenerateSystemPrompt() (string, error) {
 	var prompt strings.Builder
 	prompt.WriteString("以下是项目中已有的代码结构信息，请在设计和实现时参考这些信息，避免创建重复或冲突的函数和结构体：\n\n")
 
-	// 包信息
 	if len(codeInfo.Packages) > 0 {
 		prompt.WriteString("## 包列表\n")
 		for _, pkg := range codeInfo.Packages {
@@ -347,7 +425,18 @@ func (i *Inspector) GenerateSystemPrompt() (string, error) {
 		prompt.WriteString("\n")
 	}
 
-	// 结构体信息
+	if len(codeInfo.Imports) > 0 {
+		prompt.WriteString("## 导入样例\n")
+		for _, item := range topImports(codeInfo.Imports, 10) {
+			alias := ""
+			if item.Alias != "" {
+				alias = item.Alias + " "
+			}
+			prompt.WriteString(fmt.Sprintf("- %s%s (包: %s, 文件: %s)\n", alias, item.Path, item.Package, item.File))
+		}
+		prompt.WriteString("\n")
+	}
+
 	if len(codeInfo.Structs) > 0 {
 		prompt.WriteString("## 结构体定义\n")
 		for _, structInfo := range codeInfo.Structs {
@@ -373,7 +462,6 @@ func (i *Inspector) GenerateSystemPrompt() (string, error) {
 		}
 	}
 
-	// 函数信息
 	if len(codeInfo.Functions) > 0 {
 		prompt.WriteString("## 函数定义\n")
 		for _, funcInfo := range codeInfo.Functions {
@@ -386,10 +474,18 @@ func (i *Inspector) GenerateSystemPrompt() (string, error) {
 		}
 	}
 
+	if len(codeInfo.Calls) > 0 {
+		prompt.WriteString("## 调用关系样例\n")
+		for _, edge := range topCalls(codeInfo.Calls, 12) {
+			prompt.WriteString(fmt.Sprintf("- %s -> %s (%s:%d)\n", edge.Caller, edge.Callee, edge.File, edge.Line))
+		}
+		prompt.WriteString("\n")
+	}
+
 	return prompt.String(), nil
 }
 
-// GetFunctionByName 根据名称查找函数
+// GetFunctionByName 根据名称查找函数。
 func (i *Inspector) GetFunctionByName(name string) (*FunctionInfo, error) {
 	codeInfo, err := i.ScanProject()
 	if err != nil {
@@ -405,7 +501,7 @@ func (i *Inspector) GetFunctionByName(name string) (*FunctionInfo, error) {
 	return nil, fmt.Errorf("function %s not found", name)
 }
 
-// GetStructByName 根据名称查找结构体
+// GetStructByName 根据名称查找结构体。
 func (i *Inspector) GetStructByName(name string) (*StructInfo, error) {
 	codeInfo, err := i.ScanProject()
 	if err != nil {
@@ -419,4 +515,33 @@ func (i *Inspector) GetStructByName(name string) (*StructInfo, error) {
 	}
 
 	return nil, fmt.Errorf("struct %s not found", name)
+}
+
+func topImports(items []ImportInfo, limit int) []ImportInfo {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Path == items[j].Path {
+			return items[i].File < items[j].File
+		}
+		return items[i].Path < items[j].Path
+	})
+	if len(items) <= limit {
+		return items
+	}
+	return items[:limit]
+}
+
+func topCalls(items []CallEdgeInfo, limit int) []CallEdgeInfo {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Caller == items[j].Caller {
+			if items[i].Callee == items[j].Callee {
+				return items[i].Line < items[j].Line
+			}
+			return items[i].Callee < items[j].Callee
+		}
+		return items[i].Caller < items[j].Caller
+	})
+	if len(items) <= limit {
+		return items
+	}
+	return items[:limit]
 }

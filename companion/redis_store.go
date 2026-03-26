@@ -1,9 +1,12 @@
 package companion
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os/exec"
@@ -14,6 +17,7 @@ import (
 
 type stateStore interface {
 	SaveJSON(ctx context.Context, key string, value any) error
+	LoadJSON(ctx context.Context, key string, value any) error
 	Status() string
 }
 
@@ -23,6 +27,10 @@ type noopStateStore struct {
 
 func (s *noopStateStore) SaveJSON(_ context.Context, _ string, _ any) error {
 	return nil
+}
+
+func (s *noopStateStore) LoadJSON(_ context.Context, _ string, _ any) error {
+	return errors.New("state store unavailable")
 }
 
 func (s *noopStateStore) Status() string {
@@ -116,6 +124,18 @@ func (s *redisStateStore) SaveJSON(ctx context.Context, key string, value any) e
 	return s.run(ctx, []string{"SET", s.prefixed(key), string(data)})
 }
 
+func (s *redisStateStore) LoadJSON(ctx context.Context, key string, value any) error {
+	reply, err := s.runRaw(ctx, []string{"GET", s.prefixed(key)})
+	if err != nil {
+		return err
+	}
+	raw, err := parseBulkString(reply)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(raw), value)
+}
+
 func (s *redisStateStore) ping(ctx context.Context) error {
 	return s.run(ctx, []string{"PING"})
 }
@@ -128,37 +148,41 @@ func (s *redisStateStore) prefixed(key string) string {
 }
 
 func (s *redisStateStore) run(ctx context.Context, parts []string) error {
+	_, err := s.runRaw(ctx, parts)
+	return err
+}
+
+func (s *redisStateStore) runRaw(ctx context.Context, parts []string) (string, error) {
 	dialer := net.Dialer{Timeout: s.timeout}
 	conn, err := dialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(s.timeout))
 
 	if s.password != "" {
 		if _, err := conn.Write([]byte(respArray("AUTH", s.password))); err != nil {
-			return err
+			return "", err
 		}
 		if _, err := readRESP(conn); err != nil {
-			return err
+			return "", err
 		}
 	}
 
 	if s.db > 0 {
 		if _, err := conn.Write([]byte(respArray("SELECT", strconv.Itoa(s.db)))); err != nil {
-			return err
+			return "", err
 		}
 		if _, err := readRESP(conn); err != nil {
-			return err
+			return "", err
 		}
 	}
 
 	if _, err := conn.Write([]byte(respArray(parts...))); err != nil {
-		return err
+		return "", err
 	}
-	_, err = readRESP(conn)
-	return err
+	return readRESP(conn)
 }
 
 func respArray(parts ...string) string {
@@ -171,16 +195,54 @@ func respArray(parts ...string) string {
 }
 
 func readRESP(conn net.Conn) (string, error) {
-	buffer := make([]byte, 4096)
-	n, err := conn.Read(buffer)
+	reader := bufio.NewReader(conn)
+	prefix, err := reader.ReadByte()
 	if err != nil {
 		return "", err
 	}
-	reply := string(buffer[:n])
-	if strings.HasPrefix(reply, "-") {
-		return reply, fmt.Errorf("%s", strings.TrimSpace(strings.TrimPrefix(reply, "-")))
+
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
 	}
-	return reply, nil
+	reply := string(prefix) + line
+	switch prefix {
+	case '-':
+		return reply, fmt.Errorf("%s", strings.TrimSpace(strings.TrimPrefix(reply, "-")))
+	case '+', ':':
+		return reply, nil
+	case '$':
+		length, convErr := strconv.Atoi(strings.TrimSpace(line))
+		if convErr != nil {
+			return reply, convErr
+		}
+		if length < 0 {
+			return reply, errors.New("redis key not found")
+		}
+		payload := make([]byte, length+2)
+		if _, err := io.ReadFull(reader, payload); err != nil {
+			return reply, err
+		}
+		return reply + string(payload), nil
+	default:
+		return reply, nil
+	}
+}
+
+func parseBulkString(reply string) (string, error) {
+	if strings.HasPrefix(reply, "$-1") {
+		return "", errors.New("redis key not found")
+	}
+	if !strings.HasPrefix(reply, "$") {
+		return "", fmt.Errorf("unexpected redis reply: %s", strings.TrimSpace(reply))
+	}
+	firstBreak := strings.Index(reply, "\r\n")
+	if firstBreak < 0 {
+		return "", fmt.Errorf("invalid redis bulk string reply")
+	}
+	payload := reply[firstBreak+2:]
+	payload = strings.TrimSuffix(payload, "\r\n")
+	return payload, nil
 }
 
 func ensureRedisContainer(ctx context.Context, cfg RedisConfig) error {

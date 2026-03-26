@@ -29,8 +29,12 @@ type SymbolSnapshot struct {
 	PackageCount  int      `json:"package_count"`
 	StructCount   int      `json:"struct_count"`
 	FunctionCount int      `json:"function_count"`
+	ImportCount   int      `json:"import_count"`
+	CallEdgeCount int      `json:"call_edge_count"`
 	TopStructs    []string `json:"top_structs"`
 	TopFunctions  []string `json:"top_functions"`
+	TopImports    []string `json:"top_imports"`
+	TopCalls      []string `json:"top_calls"`
 	Preview       string   `json:"preview"`
 }
 
@@ -96,6 +100,22 @@ type TroubleshootingReport struct {
 	Recommendations []string `json:"recommendations"`
 }
 
+// WorkflowNodeTrace 描述一次阶段图中的节点执行结果。
+type WorkflowNodeTrace struct {
+	Name    string   `json:"name"`
+	Backend string   `json:"backend"`
+	Status  string   `json:"status"`
+	Summary string   `json:"summary,omitempty"`
+	Targets []string `json:"targets,omitempty"`
+}
+
+// WorkflowTraceReport 描述本次运行的阶段化编排结果。
+type WorkflowTraceReport struct {
+	Graph   string              `json:"graph"`
+	Backend string              `json:"backend"`
+	Nodes   []WorkflowNodeTrace `json:"nodes"`
+}
+
 // ExecutionAction 描述一个可选的手动执行动作。
 type ExecutionAction struct {
 	ID               string     `json:"id"`
@@ -104,6 +124,8 @@ type ExecutionAction struct {
 	Status           string     `json:"status"`
 	Summary          string     `json:"summary"`
 	Command          string     `json:"command,omitempty"`
+	Workdir          string     `json:"workdir,omitempty"`
+	Targets          []string   `json:"targets,omitempty"`
 	Output           string     `json:"output,omitempty"`
 	RequiresApproval bool       `json:"requires_approval"`
 	LastExecutedAt   *time.Time `json:"last_executed_at,omitempty"`
@@ -111,27 +133,33 @@ type ExecutionAction struct {
 
 // RunReport 是一次伴侣执行的完整报告。
 type RunReport struct {
-	ID               string                `json:"id"`
-	Goal             string                `json:"goal"`
-	CreatedAt        time.Time             `json:"created_at"`
-	Complexity       ComplexityReport      `json:"complexity"`
-	Route            RouteDecision         `json:"route"`
-	UsedProvider     string                `json:"used_provider"`
-	Attempts         []ProviderAttempt     `json:"attempts"`
-	Steps            []ExecutionStep       `json:"steps"`
-	Symbols          SymbolSnapshot        `json:"symbols"`
-	Screen           ScreenContext         `json:"screen"`
-	Knowledge        []KnowledgeMatch      `json:"knowledge"`
-	Plan             Plan                  `json:"plan"`
-	Artifacts        []GeneratedArtifact   `json:"artifacts,omitempty"`
-	Snapshot         SnapshotReport        `json:"snapshot"`
-	Troubleshoot     TroubleshootingReport `json:"troubleshoot"`
-	ExecutionActions []ExecutionAction     `json:"execution_actions,omitempty"`
-	Preflight        preflight.Report      `json:"preflight"`
-	MarkdownPath     string                `json:"markdown_path"`
-	JSONPath         string                `json:"json_path"`
-	MarkdownURL      string                `json:"markdown_url"`
-	JSONURL          string                `json:"json_url"`
+	ID                string                `json:"id"`
+	Goal              string                `json:"goal"`
+	CreatedAt         time.Time             `json:"created_at"`
+	Complexity        ComplexityReport      `json:"complexity"`
+	Route             RouteDecision         `json:"route"`
+	WorkflowBackend   string                `json:"workflow_backend,omitempty"`
+	UsedProvider      string                `json:"used_provider"`
+	Attempts          []ProviderAttempt     `json:"attempts"`
+	Steps             []ExecutionStep       `json:"steps"`
+	Symbols           SymbolSnapshot        `json:"symbols"`
+	Screen            ScreenContext         `json:"screen"`
+	Knowledge         []KnowledgeMatch      `json:"knowledge"`
+	Plan              Plan                  `json:"plan"`
+	Codegen           CodeGenerationReport  `json:"codegen"`
+	WorkflowTrace     WorkflowTraceReport   `json:"workflow_trace"`
+	ValidationTargets []string              `json:"validation_targets,omitempty"`
+	Artifacts         []GeneratedArtifact   `json:"artifacts,omitempty"`
+	Snapshot          SnapshotReport        `json:"snapshot"`
+	RepairRounds      []RepairRound         `json:"repair_rounds,omitempty"`
+	Sandbox           SandboxValidation     `json:"sandbox"`
+	Troubleshoot      TroubleshootingReport `json:"troubleshoot"`
+	ExecutionActions  []ExecutionAction     `json:"execution_actions,omitempty"`
+	Preflight         preflight.Report      `json:"preflight"`
+	MarkdownPath      string                `json:"markdown_path"`
+	JSONPath          string                `json:"json_path"`
+	MarkdownURL       string                `json:"markdown_url"`
+	JSONURL           string                `json:"json_url"`
 }
 
 // RunDigest 用于首页展示历史记录摘要。
@@ -231,6 +259,9 @@ func (s *Service) Bootstrap(ctx context.Context) error {
 	if err := s.loadHistory(); err != nil {
 		return err
 	}
+	restoreCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	s.restoreRuntimeState(restoreCtx)
+	cancel()
 
 	s.mu.Lock()
 	s.bootstrapped = true
@@ -306,12 +337,17 @@ func (s *Service) Execute(ctx context.Context, goal string) (*RunReport, error) 
 	if goal == "" {
 		return nil, errors.New("goal cannot be empty")
 	}
+	runID := time.Now().Format("20060102150405")
 
 	s.updateWorkflow("running", "context", "正在收集 RAG、符号表和屏幕上下文", goal)
 	var steps []ExecutionStep
 	var err error
 	snapshotReport := SnapshotReport{Enabled: s.config.Runtime.EnableSnapshots}
 	var beforeSnapshot *snapshot.Manifest
+	codegenReport := CodeGenerationReport{}
+	executionRoot := s.root
+	workflowBackend := "builtin"
+	validationTargets := []string(nil)
 
 	if s.config.Runtime.EnableSnapshots {
 		s.updateWorkflow("running", "snapshot", "正在创建执行前快照", goal)
@@ -360,13 +396,35 @@ func (s *Service) Execute(ctx context.Context, goal string) (*RunReport, error) 
 		s.updateWorkflow("error", "planning", err.Error(), goal)
 		return nil, err
 	}
+	workflowBackend = planningBackend(attempts)
 	steps = append(steps, ExecutionStep{
 		Name:        "planning",
 		Status:      "completed",
-		Summary:     fmt.Sprintf("已使用 %s 生成方案", usedProvider),
+		Summary:     fmt.Sprintf("已使用 %s 生成方案 [%s]", usedProvider, workflowBackend),
 		StartedAt:   planningStarted,
 		CompletedAt: time.Now(),
 	})
+
+	if shouldGenerateCode(plan.Mode) {
+		s.updateWorkflow("running", "codegen", "正在生成代码包并写入目标工作区", goal)
+		codegenStarted := time.Now()
+		codegenReport = s.generateCodeBundle(ctx, runID, goal, plan, complexity, route, matches, screen)
+		codegenStatus := codegenReport.Status
+		if codegenStatus == "" {
+			codegenStatus = "skipped"
+		}
+		if codegenReport.Status == "completed" && strings.TrimSpace(codegenReport.OutputDir) != "" {
+			executionRoot = codegenReport.OutputDir
+		}
+		steps = append(steps, ExecutionStep{
+			Name:        "codegen",
+			Status:      codegenStatus,
+			Summary:     codegenReport.Summary,
+			StartedAt:   codegenStarted,
+			CompletedAt: time.Now(),
+		})
+	}
+	validationTargets = resolveValidationTargets(s.root, executionRoot, codegenReport)
 
 	if s.config.Runtime.EnableDocker && s.config.Runtime.EnableSandboxSmoke {
 		s.updateWorkflow("running", "sandbox", "正在验证 Docker 沙箱执行链路", goal)
@@ -385,14 +443,71 @@ func (s *Service) Execute(ctx context.Context, goal string) (*RunReport, error) 
 	if s.config.Runtime.EnablePreflight {
 		s.updateWorkflow("running", "preflight", "正在执行工程预检", goal)
 		preflightStarted := time.Now()
-		preflightReport = preflight.Run(ctx, s.root)
+		preflightReport = preflight.RunWithTargets(ctx, executionRoot, validationTargets)
 		steps = append(steps, ExecutionStep{
 			Name:        "preflight",
 			Status:      "completed",
-			Summary:     preflightSummary(preflightReport),
+			Summary:     fmt.Sprintf("%s [workspace=%s]", preflightSummary(preflightReport), runTargetLabel(s.root, executionRoot)),
 			StartedAt:   preflightStarted,
 			CompletedAt: time.Now(),
 		})
+	}
+
+	var repairRounds []RepairRound
+	if s.config.Runtime.EnablePreflight && hasPreflightFailure(preflightReport) && s.config.Runtime.AutoRepairRounds > 0 {
+		s.updateWorkflow("running", "repair", "正在执行自动修复轮次", goal)
+		repairStarted := time.Now()
+		repairRounds, preflightReport = s.runAutoRepairLoop(ctx, executionRoot, preflightReport, validationTargets)
+		repairStatus := "completed"
+		repairSummary := summarizeRepairRounds(repairRounds, preflightReport)
+		if hasPreflightFailure(preflightReport) {
+			repairStatus = "failed"
+		}
+		steps = append(steps, ExecutionStep{
+			Name:        "repair-loop",
+			Status:      repairStatus,
+			Summary:     repairSummary,
+			StartedAt:   repairStarted,
+			CompletedAt: time.Now(),
+		})
+	}
+
+	sandboxValidation := SandboxValidation{}
+	if s.config.Runtime.EnableDocker && s.config.Runtime.EnableDockerValidation {
+		if codegenReport.Enabled && !codegenReport.HasGoChanges() {
+			sandboxValidation = SandboxValidation{
+				Enabled:     true,
+				Status:      "skipped",
+				Summary:     "本轮未生成 Go 代码文件，已跳过 Docker 编译验证",
+				Command:     "docker api runner: skipped (no go file changes)",
+				StartedAt:   time.Now(),
+				CompletedAt: time.Now(),
+			}
+			steps = append(steps, ExecutionStep{
+				Name:        "docker-validate",
+				Status:      "skipped",
+				Summary:     sandboxValidation.Summary,
+				StartedAt:   sandboxValidation.StartedAt,
+				CompletedAt: sandboxValidation.CompletedAt,
+			})
+		} else {
+			s.updateWorkflow("running", "sandbox", "正在使用 Docker 验证当前工作区", goal)
+			sandboxValidation = s.runDockerValidation(ctx, executionRoot, validationTargets)
+			sandboxStatus := "completed"
+			if sandboxValidation.Status == "failed" {
+				sandboxStatus = "failed"
+			}
+			if sandboxValidation.Status == "skipped" {
+				sandboxStatus = "skipped"
+			}
+			steps = append(steps, ExecutionStep{
+				Name:        "docker-validate",
+				Status:      sandboxStatus,
+				Summary:     coalesce(sandboxValidation.Summary, "Docker 验证未执行"),
+				StartedAt:   sandboxValidation.StartedAt,
+				CompletedAt: sandboxValidation.CompletedAt,
+			})
+		}
 	}
 
 	if snapshotReport.Enabled && beforeSnapshot != nil {
@@ -425,23 +540,29 @@ func (s *Service) Execute(ctx context.Context, goal string) (*RunReport, error) 
 
 	s.updateWorkflow("running", "persisting", "正在写入运行报告", goal)
 	report := &RunReport{
-		ID:               time.Now().Format("20060102150405"),
-		Goal:             goal,
-		CreatedAt:        time.Now(),
-		Complexity:       complexity,
-		Route:            route,
-		UsedProvider:     usedProvider,
-		Attempts:         attempts,
-		Steps:            steps,
-		Symbols:          s.symbols,
-		Screen:           screen,
-		Knowledge:        matches,
-		Plan:             plan,
-		Snapshot:         snapshotReport,
-		Troubleshoot:     buildTroubleshooting(attempts, preflightReport, snapshotReport),
-		ExecutionActions: s.buildExecutionActions(snapshotReport, preflightReport),
-		Preflight:        preflightReport,
+		ID:                runID,
+		Goal:              goal,
+		CreatedAt:         time.Now(),
+		Complexity:        complexity,
+		Route:             route,
+		WorkflowBackend:   workflowBackend,
+		UsedProvider:      usedProvider,
+		Attempts:          attempts,
+		Steps:             steps,
+		Symbols:           s.symbols,
+		Screen:            screen,
+		Knowledge:         matches,
+		Plan:              plan,
+		Codegen:           codegenReport,
+		ValidationTargets: append([]string{}, preflightReport.Targets...),
+		Snapshot:          snapshotReport,
+		RepairRounds:      repairRounds,
+		Sandbox:           sandboxValidation,
+		Troubleshoot:      buildTroubleshooting(attempts, preflightReport, snapshotReport),
+		ExecutionActions:  s.buildExecutionActions(snapshotReport, preflightReport, executionRoot),
+		Preflight:         preflightReport,
 	}
+	report.WorkflowTrace = buildWorkflowTrace(report)
 
 	if err := s.persistRun(report); err != nil {
 		s.updateWorkflow("error", "persisting", err.Error(), goal)
@@ -599,17 +720,35 @@ func (s *Service) refreshSymbols() error {
 	for _, item := range codeInfo.Functions {
 		functionNames = append(functionNames, fmt.Sprintf("%s.%s", item.Package, item.Name))
 	}
+	importNames := make([]string, 0, len(codeInfo.Imports))
+	for _, item := range codeInfo.Imports {
+		if item.Alias != "" {
+			importNames = append(importNames, fmt.Sprintf("%s %s", item.Alias, item.Path))
+			continue
+		}
+		importNames = append(importNames, item.Path)
+	}
+	callNames := make([]string, 0, len(codeInfo.Calls))
+	for _, item := range codeInfo.Calls {
+		callNames = append(callNames, fmt.Sprintf("%s -> %s", item.Caller, item.Callee))
+	}
 
 	sort.Strings(structNames)
 	sort.Strings(functionNames)
+	sort.Strings(importNames)
+	sort.Strings(callNames)
 
 	snapshot := SymbolSnapshot{
 		PackageCount:  len(codeInfo.Packages),
 		StructCount:   len(codeInfo.Structs),
 		FunctionCount: len(codeInfo.Functions),
+		ImportCount:   len(codeInfo.Imports),
+		CallEdgeCount: len(codeInfo.Calls),
 		TopStructs:    topN(structNames, 8),
 		TopFunctions:  topN(functionNames, 10),
-		Preview:       buildSymbolPreview(codeInfo.Packages, structNames, functionNames),
+		TopImports:    topN(importNames, 8),
+		TopCalls:      topN(callNames, 10),
+		Preview:       buildSymbolPreview(codeInfo.Packages, structNames, functionNames, importNames, callNames),
 	}
 
 	s.mu.Lock()
@@ -676,7 +815,7 @@ func (s *Service) retrieveKnowledge(goal string) []KnowledgeMatch {
 }
 
 func (s *Service) generatePlan(ctx context.Context, goal string, complexity ComplexityReport, route RouteDecision, matches []KnowledgeMatch, screen ScreenContext) (Plan, string, []ProviderAttempt, error) {
-	if s.config.Workflow.Backend == "langgraph_http" && s.langGraph != nil {
+	if s.shouldUseLangGraphBackend() {
 		plan, usedProvider, err := s.langGraph.GeneratePlan(ctx, langGraphRequest{
 			Goal:       goal,
 			Complexity: complexity,
@@ -816,14 +955,18 @@ func (s *Service) buildAnalysisPrompt(goal string, complexity ComplexityReport, 
 func inferTaskMode(goal string, screen ScreenContext) string {
 	lower := strings.ToLower(strings.TrimSpace(goal))
 	switch {
-	case containsAny(lower, "文档", "markdown", "readme", "报告", "导出", "总结成", "整理成"):
-		return "document"
-	case containsAny(lower, "分析", "结构", "页面", "这个页面", "浏览器内容", "讲讲", "介绍", "梳理") && !containsAny(lower, "开发", "实现", "生成代码", "搭建", "闭环"):
-		return "analysis"
-	case containsAny(lower, "新建项目", "生成项目", "脚手架", "项目代码", "创建文件", "生成代码", "实现功能", "搭建"):
-		return "scaffold"
 	case containsAny(lower, "闭环", "持续运行", "自动修复", "自动提交", "长流程", "复杂项目"):
 		return "closed_loop"
+	case containsAny(lower, "修复", "补齐", "完善", "修改", "改造", "重构") &&
+		containsAny(lower, "当前项目", "当前仓库", "这个项目", "本项目", "current project", "current repo", "this repo"):
+		return "closed_loop"
+	case containsAny(lower, "新建项目", "生成项目", "脚手架", "项目代码", "创建文件", "生成代码", "实现功能", "搭建") ||
+		(strings.Contains(lower, "生成") && containsAny(lower, "项目", "服务", "接口", "代码", "模块", "http")):
+		return "scaffold"
+	case containsAny(lower, "分析", "结构", "页面", "这个页面", "浏览器内容", "讲讲", "介绍", "梳理") && !containsAny(lower, "开发", "实现", "生成代码", "搭建", "闭环", "生成项目"):
+		return "analysis"
+	case containsAny(lower, "文档", "markdown", "readme", "报告", "导出", "总结成", "整理成"):
+		return "document"
 	case screen.Available:
 		return "analysis"
 	default:
@@ -972,14 +1115,96 @@ func (s *Service) persistRunArtifacts(report *RunReport) error {
 			URL:     "/exports/" + report.ID + "/" + filepath.Base(planPath),
 		},
 	}
+	if preflightArtifact, err := writeJSONArtifact(exportDir, "preflight.json", report.Preflight); err == nil && preflightArtifact != nil {
+		report.Artifacts = append(report.Artifacts, *preflightArtifact)
+	} else if err != nil {
+		return err
+	}
+	if workflowArtifact, err := writeJSONArtifact(exportDir, "workflow_summary.json", map[string]any{
+		"workflow_backend":   report.WorkflowBackend,
+		"workflow_trace":     report.WorkflowTrace,
+		"validation_targets": report.ValidationTargets,
+		"steps":              report.Steps,
+	}); err == nil && workflowArtifact != nil {
+		report.Artifacts = append(report.Artifacts, *workflowArtifact)
+	} else if err != nil {
+		return err
+	}
+	if len(report.RepairRounds) > 0 {
+		if repairArtifact, err := writeJSONArtifact(exportDir, "repair_rounds.json", report.RepairRounds); err == nil && repairArtifact != nil {
+			report.Artifacts = append(report.Artifacts, *repairArtifact)
+		} else if err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(report.Sandbox.Output) != "" {
+		sandboxPath := filepath.Join(exportDir, "sandbox.log")
+		if err := os.WriteFile(sandboxPath, []byte(report.Sandbox.Output), 0o644); err != nil {
+			return err
+		}
+		report.Artifacts = append(report.Artifacts, GeneratedArtifact{
+			Name:    filepath.Base(sandboxPath),
+			Kind:    "text",
+			Summary: "Docker 沙盒验证日志，包含 stdout / stderr 与退出信息。",
+			Path:    sandboxPath,
+			URL:     "/exports/" + report.ID + "/" + filepath.Base(sandboxPath),
+		})
+	}
+	diffArtifact, diffErr := writeSnapshotDiffArtifact(exportDir, report)
+	if diffErr != nil {
+		return diffErr
+	}
+	if diffArtifact != nil {
+		report.Artifacts = append(report.Artifacts, *diffArtifact)
+	}
+	if report.Codegen.Enabled && report.Codegen.ManifestPath != "" {
+		report.Artifacts = append(report.Artifacts, GeneratedArtifact{
+			Name:    filepath.Base(report.Codegen.ManifestPath),
+			Kind:    "json",
+			Summary: "代码生成清单，记录本次写入的目标目录、文件与运行命令。",
+			Path:    report.Codegen.ManifestPath,
+		})
+	}
+	if report.Codegen.Enabled && report.Codegen.RawResponsePath != "" {
+		report.Artifacts = append(report.Artifacts, GeneratedArtifact{
+			Name:    filepath.Base(report.Codegen.RawResponsePath),
+			Kind:    "text",
+			Summary: "代码生成阶段的大模型原始输出，便于排查 JSON 解析或补丁抽取问题。",
+			Path:    report.Codegen.RawResponsePath,
+		})
+	}
 	return nil
 }
 
-func (s *Service) buildExecutionActions(snapshotReport SnapshotReport, preflightReport preflight.Report) []ExecutionAction {
+func writeJSONArtifact(exportDir, name string, payload any) (*GeneratedArtifact, error) {
+	path := filepath.Join(exportDir, name)
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return nil, err
+	}
+	return &GeneratedArtifact{
+		Name:    filepath.Base(path),
+		Kind:    "json",
+		Summary: "结构化运行留痕，可用于脚本分析、恢复状态或排查闭环问题。",
+		Path:    path,
+		URL:     "/exports/" + filepath.Base(filepath.Dir(path)) + "/" + filepath.Base(path),
+	}, nil
+}
+
+func (s *Service) buildExecutionActions(snapshotReport SnapshotReport, preflightReport preflight.Report, workdir string) []ExecutionAction {
 	var actions []ExecutionAction
 	preflightFailed := hasPreflightFailure(preflightReport)
 	workspaceChanged := snapshotReport.Enabled && snapshotReport.ChangedFiles > 0
-	gitRepo := isGitRepository(s.root)
+	targets := append([]string{}, preflightReport.Targets...)
+	targetLabel := validationScopeLabel(targets)
+	if strings.TrimSpace(workdir) == "" {
+		workdir = s.root
+	}
+	gitRepo := isGitRepository(workdir)
+	targetHint := runTargetLabel(s.root, workdir) + " / " + targetLabel
 
 	if s.config.Runtime.EnablePreflight && preflightFailed {
 		actions = append(actions, ExecutionAction{
@@ -987,8 +1212,10 @@ func (s *Service) buildExecutionActions(snapshotReport SnapshotReport, preflight
 			Title:            "重新执行工程预检",
 			Kind:             "preflight-rerun",
 			Status:           "pending",
-			Summary:          "上一轮预检存在失败项，建议先重新执行工程预检。",
-			Command:          "go test ./... && go vet ./...",
+			Summary:          fmt.Sprintf("上一轮预检存在失败项，建议先重新执行工程预检 [%s]。", targetHint),
+			Command:          "go test " + targetLabel + " && go vet " + targetLabel,
+			Workdir:          workdir,
+			Targets:          targets,
 			RequiresApproval: true,
 		})
 	}
@@ -1001,6 +1228,7 @@ func (s *Service) buildExecutionActions(snapshotReport SnapshotReport, preflight
 			Status:           "pending",
 			Summary:          fmt.Sprintf("检测到 %d 个工作区差异文件，可按 before 快照执行恢复。", snapshotReport.ChangedFiles),
 			Command:          "restore workspace from before snapshot",
+			Workdir:          s.root,
 			RequiresApproval: true,
 		})
 	}
@@ -1011,8 +1239,10 @@ func (s *Service) buildExecutionActions(snapshotReport SnapshotReport, preflight
 			Title:            "Docker 自愈执行闭环",
 			Kind:             "docker-self-heal",
 			Status:           "pending",
-			Summary:          "预检失败后，可在 Docker 中挂载当前仓库并执行 go test / go mod tidy / gofmt / go vet 的自愈链路。",
-			Command:          "docker self-heal workspace",
+			Summary:          fmt.Sprintf("预检失败后，可在 Docker 中挂载目标工作区并执行 go test / go mod tidy / gofmt / go vet 的自愈链路 [%s]。", targetHint),
+			Command:          "docker self-heal " + targetLabel,
+			Workdir:          workdir,
+			Targets:          targets,
 			RequiresApproval: true,
 		})
 	}
@@ -1020,11 +1250,11 @@ func (s *Service) buildExecutionActions(snapshotReport SnapshotReport, preflight
 	if preflightFailed {
 		title := "自动修复后自检"
 		summary := "执行 gofmt、go mod tidy、工程自检，尝试修复常见 Go 工程问题。"
-		command := "gofmt -w && go mod tidy && go test ./..."
+		command := "gofmt -w && go mod tidy && go test " + targetLabel
 		if gitRepo {
 			title = "自动修复后自检并提交"
 			summary = "执行 gofmt、go mod tidy、工程自检；如果修复成功，会自动提交当前 Git 工作区变更。"
-			command = "gofmt -w && go mod tidy && go test ./... && git commit"
+			command = "gofmt -w && go mod tidy && go test " + targetLabel + " && git commit"
 		}
 		actions = append(actions, ExecutionAction{
 			ID:               "autofix-commit",
@@ -1033,6 +1263,8 @@ func (s *Service) buildExecutionActions(snapshotReport SnapshotReport, preflight
 			Status:           "pending",
 			Summary:          summary,
 			Command:          command,
+			Workdir:          workdir,
+			Targets:          targets,
 			RequiresApproval: true,
 		})
 	}
@@ -1073,15 +1305,15 @@ type actionOutcome struct {
 func (s *Service) performAction(ctx context.Context, action ExecutionAction, report *RunReport) actionOutcome {
 	switch action.Kind {
 	case "preflight-rerun":
-		return s.performPreflightAction(ctx)
+		return s.performPreflightAction(ctx, action.Workdir, action.Targets)
 	case "snapshot-rollback":
 		return s.performRollbackAction(report)
 	case "sandbox-smoke":
 		return s.performSandboxAction()
 	case "docker-self-heal":
-		return s.performDockerSelfHealAction()
+		return s.performDockerSelfHealAction(action.Workdir, action.Targets)
 	case "autofix-commit":
-		return s.performAutoFixCommitAction(ctx)
+		return s.performAutoFixCommitAction(ctx, action.Workdir, action.Targets)
 	default:
 		return actionOutcome{
 			Status:  "failed",
@@ -1091,9 +1323,12 @@ func (s *Service) performAction(ctx context.Context, action ExecutionAction, rep
 	}
 }
 
-func (s *Service) performPreflightAction(ctx context.Context) actionOutcome {
+func (s *Service) performPreflightAction(ctx context.Context, workdir string, targets []string) actionOutcome {
 	started := time.Now()
-	report := preflight.Run(ctx, s.root)
+	if strings.TrimSpace(workdir) == "" {
+		workdir = s.root
+	}
+	report := preflight.RunWithTargets(ctx, workdir, targets)
 	status := "completed"
 	summary := preflightSummary(report)
 	if hasPreflightFailure(report) {
@@ -1253,6 +1488,11 @@ func formatPreflightReport(report preflight.Report) string {
 	}
 
 	var builder strings.Builder
+	if report.Scope != "" {
+		builder.WriteString("scope: ")
+		builder.WriteString(report.Scope)
+		builder.WriteString("\n\n")
+	}
 	for _, check := range report.Checks {
 		builder.WriteString(check.Name)
 		builder.WriteString(": ")
@@ -1315,7 +1555,7 @@ func (s *Service) modelFor(providerName string) string {
 
 func renderMarkdownReport(report *RunReport) string {
 	var builder strings.Builder
-	builder.WriteString("# Desk Companion Run Report\n\n")
+	builder.WriteString("# Go R&D Agent Run Report\n\n")
 	builder.WriteString("## Goal\n")
 	builder.WriteString(report.Goal)
 	builder.WriteString("\n\n")
@@ -1323,8 +1563,16 @@ func renderMarkdownReport(report *RunReport) string {
 	builder.WriteString(fmt.Sprintf("- `%s`\n\n", coalesce(report.Plan.Mode, "general")))
 	builder.WriteString("## Routing\n")
 	builder.WriteString(fmt.Sprintf("- Complexity: `%s` (%d)\n", report.Complexity.Level, report.Complexity.Score))
+	builder.WriteString(fmt.Sprintf("- Workflow Backend: `%s`\n", coalesce(report.WorkflowBackend, "builtin")))
 	builder.WriteString(fmt.Sprintf("- Provider: `%s`\n", report.UsedProvider))
 	builder.WriteString(fmt.Sprintf("- Decision: %s\n\n", report.Route.Reason))
+	if len(report.ValidationTargets) > 0 {
+		builder.WriteString("## Validation Scope\n")
+		for _, target := range report.ValidationTargets {
+			builder.WriteString(fmt.Sprintf("- `%s`\n", target))
+		}
+		builder.WriteString("\n")
+	}
 	builder.WriteString("## Snapshot\n")
 	if report.Snapshot.Enabled {
 		builder.WriteString(fmt.Sprintf("- Before: `%s`\n", report.Snapshot.BeforePath))
@@ -1342,6 +1590,19 @@ func renderMarkdownReport(report *RunReport) string {
 		builder.WriteString(fmt.Sprintf("- `%s`: %s (%s)\n", step.Name, step.Status, step.Summary))
 	}
 	builder.WriteString("\n")
+	builder.WriteString("## Workflow Trace\n")
+	builder.WriteString(fmt.Sprintf("- Graph: `%s`\n", report.WorkflowTrace.Graph))
+	for _, node := range report.WorkflowTrace.Nodes {
+		builder.WriteString(fmt.Sprintf("- `%s`: %s via `%s`", node.Name, node.Status, coalesce(node.Backend, "builtin")))
+		if node.Summary != "" {
+			builder.WriteString(" (" + node.Summary + ")")
+		}
+		builder.WriteString("\n")
+		if len(node.Targets) > 0 {
+			builder.WriteString(fmt.Sprintf("  - Targets: `%s`\n", strings.Join(node.Targets, ", ")))
+		}
+	}
+	builder.WriteString("\n")
 	builder.WriteString("## Screen Context\n")
 	if report.Screen.Available {
 		builder.WriteString(fmt.Sprintf("- Source: `%s`\n", report.Screen.SourceLabel))
@@ -1354,6 +1615,44 @@ func renderMarkdownReport(report *RunReport) string {
 	builder.WriteString("## Plan Overview\n")
 	builder.WriteString(report.Plan.Overview)
 	builder.WriteString("\n\n")
+
+	builder.WriteString("## Code Generation\n")
+	if !report.Codegen.Enabled {
+		builder.WriteString("- Disabled\n\n")
+	} else {
+		builder.WriteString(fmt.Sprintf("- Status: `%s`\n", report.Codegen.Status))
+		builder.WriteString(fmt.Sprintf("- Summary: %s\n", report.Codegen.Summary))
+		builder.WriteString(fmt.Sprintf("- Backend: `%s`\n", coalesce(report.Codegen.Backend, "builtin")))
+		builder.WriteString(fmt.Sprintf("- Target Mode: `%s`\n", coalesce(report.Codegen.TargetMode, "isolated_workspace")))
+		builder.WriteString(fmt.Sprintf("- Provider: `%s`\n", coalesce(report.Codegen.Provider, "n/a")))
+		builder.WriteString(fmt.Sprintf("- Parse Mode: `%s`\n", coalesce(report.Codegen.ParseMode, "n/a")))
+		if report.Codegen.ParseError != "" {
+			builder.WriteString(fmt.Sprintf("- Parse Error: %s\n", report.Codegen.ParseError))
+		}
+		builder.WriteString(fmt.Sprintf("- Output Dir: `%s`\n", report.Codegen.OutputDir))
+		if len(report.Codegen.PatchCandidates) > 0 {
+			builder.WriteString("- Candidates:\n")
+			for _, candidate := range report.Codegen.PatchCandidates {
+				builder.WriteString(fmt.Sprintf("  - `%s`\n", candidate))
+			}
+		}
+		if len(report.Codegen.RejectedFiles) > 0 {
+			builder.WriteString("- Rejected Files:\n")
+			for _, rejected := range report.Codegen.RejectedFiles {
+				builder.WriteString(fmt.Sprintf("  - `%s`\n", rejected))
+			}
+		}
+		if report.Codegen.ManifestPath != "" {
+			builder.WriteString(fmt.Sprintf("- Manifest: `%s`\n", report.Codegen.ManifestPath))
+		}
+		if report.Codegen.RawResponsePath != "" {
+			builder.WriteString(fmt.Sprintf("- Raw Response: `%s`\n", report.Codegen.RawResponsePath))
+		}
+		for _, file := range report.Codegen.Files {
+			builder.WriteString(fmt.Sprintf("- File: `%s` (%s, %d bytes)\n", file.Path, coalesce(file.Purpose, "generated"), file.Bytes))
+		}
+		builder.WriteString("\n")
+	}
 
 	writeList(&builder, "Actions", report.Plan.Actions)
 	writeList(&builder, "Deliverables", report.Plan.Deliverables)
@@ -1379,6 +1678,35 @@ func renderMarkdownReport(report *RunReport) string {
 		builder.WriteString(fmt.Sprintf("- `%s`: %s (%s)\n", check.Name, check.Status, check.Summary))
 	}
 	builder.WriteString("\n")
+	builder.WriteString("## Repair Rounds\n")
+	if len(report.RepairRounds) == 0 {
+		builder.WriteString("- None\n\n")
+	} else {
+		for _, round := range report.RepairRounds {
+			builder.WriteString(fmt.Sprintf("- Round %d: `%s` (%s)\n", round.Round, round.Status, round.Summary))
+			if round.ChangedFiles > 0 {
+				builder.WriteString(fmt.Sprintf("  - Changed Files: `%d`\n", round.ChangedFiles))
+			}
+			if round.TerminationReason != "" {
+				builder.WriteString(fmt.Sprintf("  - Termination: %s\n", round.TerminationReason))
+			}
+		}
+		builder.WriteString("\n")
+	}
+	builder.WriteString("## Docker Validation\n")
+	if !report.Sandbox.Enabled {
+		builder.WriteString("- Disabled\n\n")
+	} else {
+		builder.WriteString(fmt.Sprintf("- Status: `%s`\n", report.Sandbox.Status))
+		builder.WriteString(fmt.Sprintf("- Summary: %s\n", report.Sandbox.Summary))
+		builder.WriteString(fmt.Sprintf("- Command: `%s`\n\n", report.Sandbox.Command))
+		if len(report.Sandbox.Targets) > 0 {
+			for _, target := range report.Sandbox.Targets {
+				builder.WriteString(fmt.Sprintf("- Target: `%s`\n", target))
+			}
+			builder.WriteString("\n")
+		}
+	}
 	builder.WriteString("## Troubleshooting\n")
 	builder.WriteString(fmt.Sprintf("- Status: `%s`\n", report.Troubleshoot.Status))
 	for _, issue := range report.Troubleshoot.Issues {
@@ -1408,6 +1736,12 @@ func renderMarkdownReport(report *RunReport) string {
 			if action.Command != "" {
 				builder.WriteString(fmt.Sprintf("  - Command: `%s`\n", action.Command))
 			}
+			if action.Workdir != "" {
+				builder.WriteString(fmt.Sprintf("  - Workdir: `%s`\n", action.Workdir))
+			}
+			if len(action.Targets) > 0 {
+				builder.WriteString(fmt.Sprintf("  - Targets: `%s`\n", strings.Join(action.Targets, ", ")))
+			}
 		}
 		builder.WriteString("\n")
 	}
@@ -1417,16 +1751,61 @@ func renderMarkdownReport(report *RunReport) string {
 
 func renderDeliverableDocument(report *RunReport) string {
 	var builder strings.Builder
-	builder.WriteString("# Companion Deliverable\n\n")
+	builder.WriteString("# Go R&D Agent Deliverable\n\n")
 	builder.WriteString("## Task\n")
 	builder.WriteString(report.Goal)
 	builder.WriteString("\n\n")
 	builder.WriteString("## Mode\n")
 	builder.WriteString(coalesce(report.Plan.Mode, "general"))
 	builder.WriteString("\n\n")
+	builder.WriteString("## Workflow Backend\n")
+	builder.WriteString(coalesce(report.WorkflowBackend, "builtin"))
+	builder.WriteString("\n\n")
+	if len(report.WorkflowTrace.Nodes) > 0 {
+		builder.WriteString("## Workflow Trace\n")
+		builder.WriteString(report.WorkflowTrace.Graph)
+		builder.WriteString("\n")
+		for _, node := range report.WorkflowTrace.Nodes {
+			builder.WriteString(fmt.Sprintf("- %s: %s via %s\n", node.Name, node.Status, coalesce(node.Backend, "builtin")))
+		}
+		builder.WriteString("\n")
+	}
 	builder.WriteString("## Direct Answer\n")
 	builder.WriteString(report.Plan.Overview)
 	builder.WriteString("\n\n")
+	if len(report.ValidationTargets) > 0 {
+		builder.WriteString("## Validation Scope\n")
+		for _, target := range report.ValidationTargets {
+			builder.WriteString("- ")
+			builder.WriteString(target)
+			builder.WriteString("\n")
+		}
+		builder.WriteString("\n")
+	}
+	if report.Codegen.Enabled {
+		builder.WriteString("## Generated Workspace\n")
+		builder.WriteString(fmt.Sprintf("- Status: %s\n", report.Codegen.Status))
+		builder.WriteString(fmt.Sprintf("- Target Mode: %s\n", coalesce(report.Codegen.TargetMode, "isolated_workspace")))
+		builder.WriteString(fmt.Sprintf("- Provider: %s\n", coalesce(report.Codegen.Provider, "n/a")))
+		builder.WriteString(fmt.Sprintf("- Parse Mode: %s\n", coalesce(report.Codegen.ParseMode, "n/a")))
+		if report.Codegen.ParseError != "" {
+			builder.WriteString(fmt.Sprintf("- Parse Error: %s\n", report.Codegen.ParseError))
+		}
+		builder.WriteString(fmt.Sprintf("- Output Dir: %s\n", report.Codegen.OutputDir))
+		if report.Codegen.RawResponsePath != "" {
+			builder.WriteString(fmt.Sprintf("- Raw Response: %s\n", report.Codegen.RawResponsePath))
+		}
+		for _, candidate := range report.Codegen.PatchCandidates {
+			builder.WriteString(fmt.Sprintf("- Candidate: %s\n", candidate))
+		}
+		for _, rejected := range report.Codegen.RejectedFiles {
+			builder.WriteString(fmt.Sprintf("- Rejected: %s\n", rejected))
+		}
+		for _, file := range report.Codegen.Files {
+			builder.WriteString(fmt.Sprintf("- %s: %s\n", file.Path, coalesce(file.Purpose, "generated file")))
+		}
+		builder.WriteString("\n")
+	}
 	if report.Screen.Available {
 		builder.WriteString("## Browser / Screen Context\n")
 		builder.WriteString(fmt.Sprintf("- Source: %s\n", report.Screen.SourceLabel))
@@ -1446,6 +1825,18 @@ func renderDeliverableDocument(report *RunReport) string {
 	writeList(&builder, "Progress Signals", report.Plan.ProgressSignals)
 	writeList(&builder, "Risks", report.Plan.Risks)
 	writeList(&builder, "Next Steps", report.Plan.NextSteps)
+	if len(report.RepairRounds) > 0 {
+		builder.WriteString("## Repair Loop\n")
+		for _, round := range report.RepairRounds {
+			builder.WriteString(fmt.Sprintf("- Round %d: %s (%s)\n", round.Round, round.Summary, round.Status))
+		}
+		builder.WriteString("\n")
+	}
+	if report.Sandbox.Enabled {
+		builder.WriteString("## Docker Validation\n")
+		builder.WriteString(fmt.Sprintf("- Status: %s\n", report.Sandbox.Status))
+		builder.WriteString(fmt.Sprintf("- Summary: %s\n\n", report.Sandbox.Summary))
+	}
 	if len(report.Knowledge) > 0 {
 		builder.WriteString("## Knowledge Evidence\n")
 		for _, match := range report.Knowledge {
@@ -1640,9 +2031,11 @@ func fallbackPlan(goal string, matches []KnowledgeMatch) Plan {
 	}
 }
 
-func buildSymbolPreview(packages, structs, functions []string) string {
+func buildSymbolPreview(packages, structs, functions, imports, calls []string) string {
 	var builder strings.Builder
 	builder.WriteString(fmt.Sprintf("包数量: %d\n", len(packages)))
+	builder.WriteString(fmt.Sprintf("导入数量: %d\n", len(imports)))
+	builder.WriteString(fmt.Sprintf("调用边数量: %d\n", len(calls)))
 	builder.WriteString("结构体样例:\n")
 	for _, item := range topN(structs, 6) {
 		builder.WriteString("- ")
@@ -1651,6 +2044,18 @@ func buildSymbolPreview(packages, structs, functions []string) string {
 	}
 	builder.WriteString("函数样例:\n")
 	for _, item := range topN(functions, 8) {
+		builder.WriteString("- ")
+		builder.WriteString(item)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("导入样例:\n")
+	for _, item := range topN(imports, 6) {
+		builder.WriteString("- ")
+		builder.WriteString(item)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("调用关系样例:\n")
+	for _, item := range topN(calls, 8) {
 		builder.WriteString("- ")
 		builder.WriteString(item)
 		builder.WriteString("\n")
@@ -1703,7 +2108,119 @@ func preflightSummary(report preflight.Report) string {
 			failed++
 		}
 	}
-	return fmt.Sprintf("预检完成: passed=%d failed=%d total=%d", passed, failed, len(report.Checks))
+	summary := fmt.Sprintf("预检完成: passed=%d failed=%d total=%d", passed, failed, len(report.Checks))
+	if report.Scope != "" {
+		return summary + " [" + report.Scope + "]"
+	}
+	return summary
+}
+
+func runTargetLabel(root, target string) string {
+	if strings.TrimSpace(target) == "" {
+		return "workspace"
+	}
+	if target == root {
+		return "main-workspace"
+	}
+	if rel, err := filepath.Rel(root, target); err == nil {
+		return filepath.ToSlash(rel)
+	}
+	return target
+}
+
+func buildWorkflowTrace(report *RunReport) WorkflowTraceReport {
+	trace := WorkflowTraceReport{
+		Graph:   "goal-intake -> complexity-routing -> context-prep -> planning -> codegen -> preflight -> repair-loop -> docker-validate -> artifact-persist",
+		Backend: coalesce(report.WorkflowBackend, "builtin"),
+		Nodes: []WorkflowNodeTrace{
+			{Name: "goal-intake", Backend: "builtin", Status: "completed", Summary: truncate(report.Goal, 160)},
+			{Name: "complexity-routing", Backend: "builtin", Status: "completed", Summary: report.Route.Reason},
+			{Name: "context-prep", Backend: "builtin", Status: "completed", Summary: screenSummary(report.Screen, len(report.Knowledge))},
+			{Name: "planning", Backend: coalesce(report.WorkflowBackend, "builtin"), Status: "completed", Summary: coalesce(report.Plan.Overview, "plan generated")},
+		},
+	}
+
+	codegenStatus := "skipped"
+	codegenBackend := coalesce(report.Codegen.Backend, "builtin")
+	codegenSummary := report.Codegen.Summary
+	if report.Codegen.Enabled {
+		codegenStatus = coalesce(report.Codegen.Status, "completed")
+	}
+	trace.Nodes = append(trace.Nodes, WorkflowNodeTrace{
+		Name:    "codegen",
+		Backend: codegenBackend,
+		Status:  codegenStatus,
+		Summary: coalesce(codegenSummary, "code generation not enabled"),
+	})
+
+	preflightStatus := "skipped"
+	preflightSummaryText := "preflight disabled"
+	if len(report.Preflight.Checks) > 0 {
+		preflightStatus = "completed"
+		if hasPreflightFailure(report.Preflight) {
+			preflightStatus = "failed"
+		}
+		preflightSummaryText = preflightSummary(report.Preflight)
+	}
+	trace.Nodes = append(trace.Nodes, WorkflowNodeTrace{
+		Name:    "preflight",
+		Backend: "builtin",
+		Status:  preflightStatus,
+		Summary: preflightSummaryText,
+		Targets: append([]string{}, report.ValidationTargets...),
+	})
+
+	repairStatus := "skipped"
+	repairSummaryText := "repair loop not triggered"
+	if len(report.RepairRounds) > 0 {
+		repairStatus = "completed"
+		if hasPreflightFailure(report.Preflight) {
+			repairStatus = "failed"
+		}
+		repairSummaryText = summarizeRepairRounds(report.RepairRounds, report.Preflight)
+	}
+	trace.Nodes = append(trace.Nodes, WorkflowNodeTrace{
+		Name:    "repair-loop",
+		Backend: "builtin",
+		Status:  repairStatus,
+		Summary: repairSummaryText,
+		Targets: append([]string{}, report.ValidationTargets...),
+	})
+
+	dockerStatus := "skipped"
+	dockerSummary := "docker validation disabled"
+	if report.Sandbox.Enabled {
+		dockerStatus = coalesce(report.Sandbox.Status, "completed")
+		dockerSummary = coalesce(report.Sandbox.Summary, "docker validation executed")
+	}
+	trace.Nodes = append(trace.Nodes, WorkflowNodeTrace{
+		Name:    "docker-validate",
+		Backend: "builtin",
+		Status:  dockerStatus,
+		Summary: dockerSummary,
+		Targets: append([]string{}, report.Sandbox.Targets...),
+	})
+
+	trace.Nodes = append(trace.Nodes, WorkflowNodeTrace{
+		Name:    "artifact-persist",
+		Backend: "builtin",
+		Status:  "completed",
+		Summary: fmt.Sprintf("artifacts=%d", len(report.Artifacts)),
+	})
+	return trace
+}
+
+func planningBackend(attempts []ProviderAttempt) string {
+	for _, attempt := range attempts {
+		if attempt.Success && attempt.Name == "langgraph-http" {
+			return "langgraph_http"
+		}
+	}
+	return "builtin"
+}
+
+func (s *Service) shouldUseLangGraphBackend() bool {
+	return (s.config.Workflow.Backend == "langgraph_http" || s.config.Workflow.Backend == "auto") && s.langGraph != nil
 }
 
 func (s *Service) providerTimeout(level ComplexityLevel, providerName string) time.Duration {

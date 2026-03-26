@@ -1,5 +1,0 @@
-imap:
-  username: "your_qq_email@qq.com"
-  password: "your_qq_authorization_code"
-  server: "imap.qq.com"
-  port: 993

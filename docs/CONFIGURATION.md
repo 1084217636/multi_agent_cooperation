@@ -48,14 +48,27 @@ providers:
 
 ## 5. `workflow`
 
-- `backend`：`builtin` 或 `langgraph_http`
-- `langgraph_endpoint`：外部 LangGraph HTTP bridge 地址
+- `backend`：`builtin`、`auto` 或 `langgraph_http`
+- `langgraph_endpoint`：外部 LangGraph HTTP bridge 地址，推荐写成带 `{operation}` 的模板
 - `langgraph_timeout_sec`：调用外部图编排服务的超时
 
 说明：
 
 - 今天可直接用的是内置 Go 编排
 - 如果你已经有 Python / LangGraph 服务，可以把 `backend` 改成 `langgraph_http`
+- 如果你想兼顾本地兜底和远端图编排，保持 `backend: auto`
+- 推荐配置：
+
+```yaml
+workflow:
+  backend: "auto"
+  langgraph_endpoint: "http://127.0.0.1:8000/{operation}"
+```
+
+这里 `{operation}` 会被替换成：
+
+- `plan`
+- `codegen`
 
 ## 6. `redis`
 

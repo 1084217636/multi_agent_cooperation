@@ -23,15 +23,17 @@ type AppConfig struct {
 
 // RuntimeConfig 定义运行期开关。
 type RuntimeConfig struct {
-	DefaultMode         string `yaml:"default_mode" json:"default_mode"`
-	EnableSymbols       bool   `yaml:"enable_symbols" json:"enable_symbols"`
-	EnableRAG           bool   `yaml:"enable_rag" json:"enable_rag"`
-	EnablePreflight     bool   `yaml:"enable_preflight" json:"enable_preflight"`
-	EnableDocker        bool   `yaml:"enable_docker" json:"enable_docker"`
-	EnableSnapshots     bool   `yaml:"enable_snapshots" json:"enable_snapshots"`
-	EnableSandboxSmoke  bool   `yaml:"enable_sandbox_smoke" json:"enable_sandbox_smoke"`
-	MaxKnowledgeResults int    `yaml:"max_knowledge_results" json:"max_knowledge_results"`
-	ProviderTimeoutSec  int    `yaml:"provider_timeout_sec" json:"provider_timeout_sec"`
+	DefaultMode            string `yaml:"default_mode" json:"default_mode"`
+	EnableSymbols          bool   `yaml:"enable_symbols" json:"enable_symbols"`
+	EnableRAG              bool   `yaml:"enable_rag" json:"enable_rag"`
+	EnablePreflight        bool   `yaml:"enable_preflight" json:"enable_preflight"`
+	EnableDocker           bool   `yaml:"enable_docker" json:"enable_docker"`
+	EnableDockerValidation bool   `yaml:"enable_docker_validation" json:"enable_docker_validation"`
+	EnableSnapshots        bool   `yaml:"enable_snapshots" json:"enable_snapshots"`
+	EnableSandboxSmoke     bool   `yaml:"enable_sandbox_smoke" json:"enable_sandbox_smoke"`
+	AutoRepairRounds       int    `yaml:"auto_repair_rounds" json:"auto_repair_rounds"`
+	MaxKnowledgeResults    int    `yaml:"max_knowledge_results" json:"max_knowledge_results"`
+	ProviderTimeoutSec     int    `yaml:"provider_timeout_sec" json:"provider_timeout_sec"`
 }
 
 // WorkflowConfig 描述工作流编排后端。
@@ -91,18 +93,20 @@ func DefaultConfig(workdir string) *Config {
 			AutoOpenBrowser: true,
 		},
 		Runtime: RuntimeConfig{
-			DefaultMode:         "desktop",
-			EnableSymbols:       true,
-			EnableRAG:           true,
-			EnablePreflight:     true,
-			EnableDocker:        true,
-			EnableSnapshots:     true,
-			EnableSandboxSmoke:  false,
-			MaxKnowledgeResults: 4,
-			ProviderTimeoutSec:  20,
+			DefaultMode:            "desktop",
+			EnableSymbols:          true,
+			EnableRAG:              true,
+			EnablePreflight:        true,
+			EnableDocker:           true,
+			EnableDockerValidation: true,
+			EnableSnapshots:        true,
+			EnableSandboxSmoke:     false,
+			AutoRepairRounds:       2,
+			MaxKnowledgeResults:    4,
+			ProviderTimeoutSec:     20,
 		},
 		Workflow: WorkflowConfig{
-			Backend:             "builtin",
+			Backend:             "auto",
 			LangGraphEndpoint:   "",
 			LangGraphTimeoutSec: 25,
 		},

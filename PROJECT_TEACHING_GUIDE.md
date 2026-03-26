@@ -12,6 +12,10 @@
 3. 再看“每个技术栈是什么”
 4. 最后看“当前项目还缺什么”
 
+如果你经常被英文术语卡住，先配合看：
+
+- [TERM_GLOSSARY.md](/home/root1/go_learn/multi_agent_cooperation/TERM_GLOSSARY.md)
+
 ---
 
 ## 1. 项目总览

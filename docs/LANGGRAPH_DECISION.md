@@ -39,26 +39,43 @@ LangGraph 在下面这些场景会比手写编排更强：
 
 ## 现在怎么兼容 LangGraph
 
-为了不把路堵死，这版已经加了一个可选的 `langgraph_http` 后端。
+为了不把路堵死，这版已经加了一个可选的 `langgraph_http` 后端，而且不再只是接 `plan`。
+
+现在 LangGraph 后端可以接管两个核心节点：
+
+- `planning`
+- `codegen`
 
 你可以在配置里写：
 
 ```yaml
 workflow:
   backend: "langgraph_http"
-  langgraph_endpoint: "http://127.0.0.1:8000/plan"
+  langgraph_endpoint: "http://127.0.0.1:8000/{operation}"
 ```
 
-这样项目会把目标、复杂度、符号、屏幕上下文和 RAG 命中发给外部 LangGraph 服务，由外部图编排返回结构化方案。
+这样项目会把目标、复杂度、符号、屏幕上下文和 RAG 命中发给外部 LangGraph 服务：
+
+- `planning` 阶段返回结构化方案
+- `codegen` 阶段返回代码包或补丁文件集合
+
+如果你的服务只有一个端点，也可以继续配置成固定地址，系统会在请求体里带上 `operation=plan|codegen`。
+
+运行报告里现在会保留：
+
+- `workflow_backend`
+- `workflow_trace`
+- `codegen.backend`
 
 ## 结论
 
-当前默认不直接替换成 LangGraph，不是因为它不好，而是因为：
+当前默认仍不直接把本地 Go 编排全部替换成 LangGraph，不是因为它不好，而是因为：
 
 - 对这个 Go 项目的今天版 MVP 来说，代价大于收益
 - 内置 Go 编排更容易把工作台、RAG、MCP、预检、快照和审批执行先跑通
 
 更合理的路线是：
 
-1. 默认继续用内置 Go 编排
-2. 有成熟 Python agent graph 时，再切到 `langgraph_http`
+1. 默认继续用 Go 内置编排兜底
+2. 外部有成熟 LangGraph 服务时，用 `langgraph_http` 接管 `planning + codegen`
+3. 后续如果真的需要 durable execution，再把更多节点迁到图后端

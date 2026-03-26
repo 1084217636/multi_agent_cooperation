@@ -37,6 +37,85 @@ func NewRunner() (*Runner, error) {
 	return &Runner{client: cli}, nil
 }
 
+// ValidateWorkspace 在 Docker 中挂载工作区并执行验证脚本。
+func (r *Runner) ValidateWorkspace(ctx context.Context, workdir, script string) (*ExecutionResult, error) {
+	if strings.TrimSpace(workdir) == "" {
+		return nil, fmt.Errorf("workdir cannot be empty")
+	}
+	if strings.TrimSpace(script) == "" {
+		return nil, fmt.Errorf("script cannot be empty")
+	}
+
+	started := time.Now()
+	reader, err := r.client.ImagePull(ctx, "golang:1.25", image.PullOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to pull image: %w", err)
+	}
+	io.Copy(io.Discard, reader)
+	reader.Close()
+
+	containerConfig := &container.Config{
+		Image:      "golang:1.25",
+		WorkingDir: "/workspace",
+		Cmd:        []string{"sh", "-lc", script},
+		Env: []string{
+			"PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"GOCACHE=/tmp/go-cache",
+			"GOMODCACHE=/tmp/go-mod-cache",
+			"GOTOOLCHAIN=local",
+		},
+	}
+
+	hostConfig := &container.HostConfig{
+		Binds: []string{workdir + ":/workspace"},
+	}
+
+	resp, err := r.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create validation container: %w", err)
+	}
+	defer r.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+
+	if err := r.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		return nil, fmt.Errorf("failed to start validation container: %w", err)
+	}
+
+	statusCh, errCh := r.client.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case waitErr := <-errCh:
+		if waitErr != nil {
+			return nil, fmt.Errorf("validation wait error: %w", waitErr)
+		}
+	case <-statusCh:
+	}
+
+	logs, err := r.client.ContainerLogs(ctx, resp.ID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get validation logs: %w", err)
+	}
+	defer logs.Close()
+
+	var stdoutBuf, stderrBuf strings.Builder
+	if _, err := stdcopy.StdCopy(&stdoutBuf, &stderrBuf, logs); err != nil {
+		return nil, fmt.Errorf("failed to parse validation logs: %w", err)
+	}
+
+	inspect, err := r.client.ContainerInspect(ctx, resp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect validation container: %w", err)
+	}
+
+	return &ExecutionResult{
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
+		ExitCode: inspect.State.ExitCode,
+		Duration: time.Since(started),
+	}, nil
+}
+
 // ExecuteCode 执行Go代码
 func (r *Runner) ExecuteCode(code string) (*ExecutionResult, error) {
 	ctx := context.Background()

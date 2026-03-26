@@ -6,3 +6,5 @@ bin/
 *.exe
 *.out
 *.log
+workspace_runs/
+generated_patches/
