@@ -19,6 +19,7 @@ type GeneratedFileRecord struct {
 	Purpose  string `json:"purpose,omitempty"`
 	Language string `json:"language,omitempty"`
 	Bytes    int    `json:"bytes"`
+	URL      string `json:"url,omitempty"`
 }
 
 // CodeGenerationReport 汇总代码生成与写回结果。
@@ -136,6 +137,9 @@ func (s *Service) generateCodeBundle(ctx context.Context, runID string, goal str
 		report.Notes = append(report.Notes, "source provider before fallback: "+result.SourceProvider)
 	}
 	report.ManifestPath = manifestPath
+	for idx := range fileRecords {
+		fileRecords[idx].URL = s.generatedFileURL(targetMode, report.OutputDir, fileRecords[idx].Path)
+	}
 	report.Files = fileRecords
 	report.RawResponsePath = result.RawResponsePath
 	report.CompletedAt = time.Now()
@@ -173,7 +177,7 @@ type codeBundleResult struct {
 
 func (s *Service) resolveCodegenTarget(runID, goal, mode string) (targetMode, outputDir, manifestPath string, cleanOutput bool) {
 	targetMode = "isolated_workspace"
-	outputDir = filepath.Join(s.root, "workspace_runs", runID)
+	outputDir = filepath.Join(s.generatedRoot(), runID)
 	manifestPath = filepath.Join(outputDir, "bundle_manifest.json")
 	cleanOutput = true
 

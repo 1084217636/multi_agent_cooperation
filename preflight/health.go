@@ -93,10 +93,19 @@ func runCommand(parent context.Context, workdir, name string, args ...string) Ch
 func checkTool(name string) CheckResult {
 	path, err := exec.LookPath(name)
 	if err != nil {
+		summary := "可选工具未安装，已跳过增强纠偏"
+		output := ""
+		switch name {
+		case "goimports":
+			output = "未安装 goimports；当前仍会执行 gofmt、go test、go vet。安装后可自动整理 import。\n示例：go install golang.org/x/tools/cmd/goimports@latest"
+		case "golangci-lint":
+			output = "未安装 golangci-lint；当前仍会执行 go test、go vet。安装后可补充更严格的静态检查。\n示例：go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest"
+		}
 		return CheckResult{
 			Name:    name,
 			Status:  CheckSkipped,
-			Summary: "工具未安装，已跳过",
+			Summary: summary,
+			Output:  output,
 		}
 	}
 

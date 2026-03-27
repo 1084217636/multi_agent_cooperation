@@ -47,6 +47,8 @@ func (d *Dashboard) Run(ctx context.Context) error {
 	mux.Handle("/runs/", http.StripPrefix("/runs/", http.FileServer(http.Dir(d.dataDir+"/runs"))))
 	mux.Handle("/exports/", http.StripPrefix("/exports/", http.FileServer(http.Dir(d.dataDir+"/exports"))))
 	mux.Handle("/captures/", http.StripPrefix("/captures/", http.FileServer(http.Dir(d.dataDir+"/captures"))))
+	mux.Handle("/project-files/", http.StripPrefix("/project-files/", http.FileServer(http.Dir(d.service.projectRoot()))))
+	mux.Handle("/generated-files/", http.StripPrefix("/generated-files/", http.FileServer(http.Dir(d.service.generatedRoot()))))
 
 	server := &http.Server{
 		Addr:              d.addr,
@@ -204,13 +206,12 @@ const indexHTML = `<!doctype html>
   <title>{{.Title}}</title>
   <style>
     :root {
-      --bg: #f3ebdd;
-      --ink: #22313f;
-      --muted: #62707d;
-      --line: rgba(34,49,63,0.12);
-      --card: rgba(255,255,255,0.82);
+      --ink: #203040;
+      --muted: #5f6f7d;
+      --line: rgba(32,48,64,0.12);
+      --card: rgba(255,255,255,0.84);
       --accent: #0c6c67;
-      --accent-2: #d1633d;
+      --accent-soft: rgba(12,108,103,0.10);
       --success: #2f855a;
       --warning: #b7791f;
       --danger: #c53030;
@@ -223,342 +224,313 @@ const indexHTML = `<!doctype html>
       color: var(--ink);
       font-family: "PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",sans-serif;
       background:
-        radial-gradient(circle at 14% 12%, rgba(12,108,103,0.18), transparent 24%),
-        radial-gradient(circle at 88% 2%, rgba(209,99,61,0.17), transparent 20%),
-        linear-gradient(180deg, #fff9f2 0%, #efe4d4 100%);
+        radial-gradient(circle at 12% 8%, rgba(12,108,103,0.16), transparent 22%),
+        radial-gradient(circle at 90% 2%, rgba(209,99,61,0.14), transparent 18%),
+        linear-gradient(180deg, #fffaf3 0%, #efe4d4 100%);
     }
+    a { color: #b8542f; text-decoration: none; }
+    a:hover { text-decoration: underline; }
     .shell {
       width: min(1240px, calc(100% - 28px));
       margin: 20px auto 44px;
-      animation: rise .45s ease both;
     }
     .hero, .panel, .result-card {
       background: var(--card);
       backdrop-filter: blur(12px);
-      border: 1px solid rgba(255,255,255,0.7);
+      border: 1px solid rgba(255,255,255,0.74);
       border-radius: 28px;
       box-shadow: var(--shadow);
     }
     .hero {
       padding: 30px;
       display: grid;
-      grid-template-columns: 1.2fr .8fr;
+      grid-template-columns: 1.15fr .85fr;
       gap: 18px;
       align-items: start;
     }
     .hero h1 {
-      margin: 0 0 10px;
-      font-size: clamp(34px, 6vw, 60px);
-      line-height: .92;
+      margin: 0 0 12px;
+      font-size: clamp(36px, 6vw, 62px);
+      line-height: 0.92;
       letter-spacing: -0.05em;
     }
     .hero p {
       margin: 0;
       color: var(--muted);
       line-height: 1.8;
-      max-width: 720px;
+      max-width: 760px;
     }
     .meta-stack {
       display: grid;
       gap: 12px;
     }
-    .meta-card {
-      padding: 14px 16px;
-      border-radius: 18px;
+    .meta-card, .metric, .result-box, .provider-item, .run-item, .action-item {
+      border-radius: 20px;
       border: 1px solid var(--line);
-      background: rgba(255,255,255,0.68);
+      background: rgba(255,255,255,0.62);
     }
+    .meta-card {
+      padding: 16px 18px;
+    }
+    .meta-card strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .muted { color: var(--muted); line-height: 1.7; }
     .grid {
       margin-top: 18px;
       display: grid;
       grid-template-columns: repeat(12, minmax(0, 1fr));
       gap: 18px;
     }
-    .panel {
-      padding: 22px;
-    }
-    .panel h2 {
-      margin: 0 0 14px;
-      font-size: 14px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: .14em;
-    }
+    .panel { padding: 22px; }
+    .span-12 { grid-column: span 12; }
     .span-7 { grid-column: span 7; }
     .span-5 { grid-column: span 5; }
     .span-4 { grid-column: span 4; }
-    .span-8 { grid-column: span 8; }
-    .span-12 { grid-column: span 12; }
-    .cards {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .metric {
-      padding: 16px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.72);
-    }
-    .metric strong {
-      display: block;
-      font-size: 28px;
-      margin-bottom: 4px;
+    h2 {
+      margin: 0 0 16px;
+      font-size: 14px;
+      letter-spacing: .16em;
+      text-transform: uppercase;
+      color: #536171;
     }
     textarea {
       width: 100%;
-      min-height: 196px;
+      min-height: 220px;
       resize: vertical;
+      border-radius: 20px;
       border: 1px solid var(--line);
-      background: rgba(255,255,255,0.92);
-      border-radius: 18px;
-      padding: 16px;
+      padding: 18px;
       font: inherit;
+      font-size: 18px;
       color: var(--ink);
+      background: rgba(255,255,255,0.64);
       outline: none;
     }
     textarea:focus {
-      border-color: rgba(12,108,103,0.45);
-      box-shadow: 0 0 0 4px rgba(12,108,103,0.12);
+      border-color: rgba(12,108,103,0.42);
+      box-shadow: 0 0 0 4px rgba(12,108,103,0.08);
     }
-    .toolbar, .capture-actions {
+    .toolbar {
+      margin-top: 14px;
       display: flex;
-      gap: 12px;
       align-items: center;
       justify-content: space-between;
+      gap: 14px;
       flex-wrap: wrap;
-      margin-top: 12px;
     }
-    .hint, .muted {
+    .hint {
       color: var(--muted);
-      font-size: 13px;
-    }
-    .inline-result {
-      display: none;
-      margin-top: 14px;
-      padding: 16px 18px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: rgba(12,108,103,0.07);
-    }
-    .inline-result.visible {
-      display: block;
-    }
-    .inline-result strong {
-      display: block;
-      margin-bottom: 6px;
-      font-size: 13px;
-      letter-spacing: .08em;
-      text-transform: uppercase;
-      color: var(--accent);
-    }
-    .inline-result p {
-      margin: 0;
-      line-height: 1.8;
+      line-height: 1.7;
+      max-width: 720px;
     }
     button {
-      border: 0;
+      border: none;
       border-radius: 999px;
-      padding: 13px 22px;
-      background: linear-gradient(135deg, var(--accent), #0b5a55);
-      color: #fff;
+      padding: 13px 24px;
       font: inherit;
+      font-weight: 700;
+      color: white;
+      background: linear-gradient(135deg, var(--accent), #17807a);
       cursor: pointer;
-      box-shadow: 0 10px 28px rgba(12,108,103,0.24);
+      transition: transform .18s ease, box-shadow .18s ease, opacity .18s ease;
+      box-shadow: 0 14px 32px rgba(12,108,103,0.26);
     }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:disabled { opacity: .7; cursor: wait; }
     button.secondary {
-      background: linear-gradient(135deg, #d7e8e7, #c6dedc);
       color: var(--ink);
+      background: rgba(255,255,255,0.82);
+      border: 1px solid var(--line);
       box-shadow: none;
     }
-    button:disabled {
-      opacity: .65;
-      cursor: wait;
-    }
-    .provider-list, .run-list, .bullet-list {
-      list-style: none;
-      margin: 0;
-      padding: 0;
+    .cards, .result-grid {
       display: grid;
-      gap: 10px;
-    }
-    .provider-item, .run-item, .step-item {
-      display: flex;
-      justify-content: space-between;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 14px;
-      padding: 14px 16px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.74);
     }
-    .status {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 72px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: .06em;
-      white-space: nowrap;
-    }
-    .status-failed {
-      background: rgba(197,48,48,0.12);
-      color: var(--danger);
-    }
-    .ready, .status-idle, .status-completed { background: rgba(47,133,90,0.12); color: var(--success); }
-    .down, .status-error { background: rgba(197,48,48,0.12); color: var(--danger); }
-    .status-running, .status-capturing { background: rgba(12,108,103,0.12); color: var(--accent); }
-    .status-waiting { background: rgba(183,121,31,0.12); color: var(--warning); }
-    .capture-card {
-      overflow: hidden;
-    }
-    .capture-preview {
-      width: 100%;
-      aspect-ratio: 16 / 10;
-      object-fit: cover;
-      display: block;
-      border-radius: 20px;
-      border: 1px solid var(--line);
-      background:
-        linear-gradient(135deg, rgba(12,108,103,0.08), rgba(209,99,61,0.08)),
-        #f4f6f8;
-    }
-    .capture-meta {
-      margin-top: 10px;
-      line-height: 1.7;
-      white-space: pre-line;
-    }
-    .result-card {
-      margin-top: 18px;
-      padding: 24px;
-      display: none;
-    }
-    .result-card.visible {
-      display: block;
-      animation: rise .35s ease both;
-    }
-    .result-head {
+    .metric {
+      padding: 16px;
+      min-height: 122px;
       display: flex;
+      flex-direction: column;
       justify-content: space-between;
-      gap: 16px;
-      align-items: flex-start;
-      margin-bottom: 16px;
     }
-    .result-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px;
+    .metric strong {
+      font-size: 28px;
+      line-height: 1;
     }
-    .action-stack {
-      margin: 18px 0 0;
-      padding: 18px;
-      border-radius: 18px;
-      background: rgba(255,255,255,0.78);
-      border: 1px solid var(--line);
+    .metric span {
+      font-size: 18px;
+      line-height: 1.35;
     }
-    .action-stack h3 {
-      margin: 0 0 12px;
-      font-size: 14px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: .1em;
-    }
-    .action-list {
+    .provider-list, .run-list, .box-list, .action-list {
       list-style: none;
       margin: 0;
       padding: 0;
       display: grid;
       gap: 12px;
     }
-    .action-item {
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,0.86);
-    }
-    .action-row {
+    .provider-item, .run-item {
+      padding: 16px 18px;
       display: flex;
-      justify-content: space-between;
-      gap: 14px;
       align-items: flex-start;
-      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
     }
-    .action-copy {
-      flex: 1 1 360px;
-    }
-    .action-copy strong {
+    .provider-item strong, .run-item strong {
       display: block;
       margin-bottom: 4px;
+      font-size: 16px;
     }
-    .action-controls {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-    .action-output {
-      margin-top: 10px;
-      padding: 12px;
-      border-radius: 14px;
-      background: rgba(12,108,103,0.06);
+    .status {
+      border-radius: 999px;
+      padding: 7px 13px;
       font-size: 12px;
-      line-height: 1.6;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .result-box {
-      padding: 18px;
-      border-radius: 18px;
-      background: rgba(255,255,255,0.78);
-      border: 1px solid var(--line);
-    }
-    .result-box h3 {
-      margin: 0 0 10px;
-      font-size: 14px;
-      color: var(--muted);
+      font-weight: 700;
+      letter-spacing: .08em;
       text-transform: uppercase;
-      letter-spacing: .1em;
+      white-space: nowrap;
     }
-    .result-box ul {
-      margin: 0;
-      padding-left: 18px;
-      line-height: 1.7;
-    }
+    .status.ready, .status-completed, .status-passed { color: var(--success); background: rgba(47,133,90,0.12); }
+    .status.down, .status-failed, .status-error { color: var(--danger); background: rgba(197,48,48,0.12); }
+    .status.status-running { color: var(--accent); background: rgba(12,108,103,0.12); }
+    .status.status-pending, .status.status-waiting, .status.status-idle { color: var(--muted); background: rgba(98,112,125,0.12); }
+    .status.status-skipped { color: var(--warning); background: rgba(183,121,31,0.14); }
     .progress-meter {
-      margin-top: 12px;
       width: 100%;
       height: 10px;
       border-radius: 999px;
-      background: rgba(34,49,63,0.08);
+      background: rgba(98,112,125,0.12);
       overflow: hidden;
     }
     .progress-fill {
-      width: 0%;
       height: 100%;
-      border-radius: 999px;
-      background: linear-gradient(135deg, var(--accent), #0b5a55);
-      transition: width .25s ease;
+      width: 0%;
+      background: linear-gradient(135deg, var(--accent), #1a8a83);
+      transition: width .28s ease;
     }
-    a {
-      color: var(--accent-2);
-      text-decoration: none;
+    .inline-result {
+      margin-top: 14px;
+      display: none;
+      border-radius: 20px;
+      border: 1px solid rgba(12,108,103,0.14);
+      background: var(--accent-soft);
+      padding: 16px 18px;
     }
-    code {
-      padding: 2px 8px;
-      border-radius: 999px;
-      background: rgba(12,108,103,0.08);
+    .inline-result.visible { display: block; }
+    .inline-result strong {
+      display: block;
+      font-size: 14px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
       color: var(--accent);
+      margin-bottom: 10px;
     }
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
+    .inline-result p {
+      margin: 0;
+      line-height: 1.75;
+      font-size: 16px;
+    }
+    .result-card {
+      margin-top: 18px;
+      padding: 22px;
+      display: none;
+    }
+    .result-card.visible { display: block; }
+    .result-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .result-box {
+      padding: 16px 18px;
+      min-height: 148px;
+    }
+    .result-box h3 {
+      margin: 0 0 12px;
+      font-size: 14px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: #5d6d7d;
+    }
+    .result-box ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .result-box li {
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.54);
+    }
+    .result-box li strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 15px;
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .action-stack {
+      margin: 22px 0 26px;
+      padding: 16px;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.56);
+      display: none;
+    }
+    .action-stack h3 {
+      margin: 0 0 14px;
+      font-size: 14px;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: #5a6878;
+    }
+    .action-item { padding: 16px; }
+    .action-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 14px;
+    }
+    .action-copy { flex: 1; }
+    .action-controls {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+    }
+    .action-output {
+      margin-top: 12px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(34,49,63,0.06);
+      color: var(--muted);
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      max-height: 220px;
+      overflow: auto;
     }
     @media (max-width: 980px) {
       .hero { grid-template-columns: 1fr; }
-      .span-7, .span-5, .span-4, .span-8, .span-12 { grid-column: span 12; }
+      .span-7, .span-5, .span-4, .span-12 { grid-column: span 12; }
       .cards, .result-grid { grid-template-columns: 1fr; }
     }
   </style>
@@ -567,13 +539,13 @@ const indexHTML = `<!doctype html>
   <div class="shell">
     <section class="hero">
       <div>
-        <h1>Go R&amp;D Agent<br>Workbench</h1>
-        <p>这不是普通聊天页，而是面向 Go 工程的研发智能体工作台。它把上下文采集、RAG、符号快照、模型路由、工程预检和运行报告串成一条更稳定的本地闭环。</p>
+        <h1>Go Project<br>Agent</h1>
+        <p>现在这页只保留面向 Go 项目的核心闭环：输入问题，限定分析边界，读取项目上下文，输出分析结果、生成代码、预检结论和可导出的产物。生成代码和被分析项目会分区展示，不再混成一块。</p>
       </div>
       <div class="meta-stack">
-        <div class="meta-card"><strong>Workspace</strong><div class="muted" id="workspaceValue">loading...</div></div>
-        <div class="meta-card"><strong>Loop Engine</strong><div class="muted" id="workflowMeta">准备中...</div></div>
-        <div class="meta-card"><strong>Screen Context</strong><div class="muted" id="screenMetaInline">等待屏幕授权</div></div>
+        <div class="meta-card"><strong>Project Root</strong><div class="muted" id="projectRootValue">loading...</div></div>
+        <div class="meta-card"><strong>Generated Root</strong><div class="muted" id="generatedRootValue">loading...</div></div>
+        <div class="meta-card"><strong>Analysis Boundary</strong><div class="muted" id="boundaryMeta">loading...</div></div>
         <div class="meta-card"><strong>Workflow Backend</strong><div class="muted" id="workflowBackendValue">builtin</div></div>
       </div>
     </section>
@@ -581,10 +553,10 @@ const indexHTML = `<!doctype html>
     <section class="grid">
       <section class="panel span-7">
         <h2>Mission Input</h2>
-        <textarea id="goalInput">围绕当前 Go 项目生成技术分析、交付文档或闭环开发方案，要求结合屏幕上下文、RAG、AST 符号快照和工程预检。</textarea>
+        <textarea id="goalInput">请基于当前 Go 项目给出技术分析，或在生成目录里创建一个最小可运行的 Go 子项目，并明确输出哪些文件、验证是否通过。</textarea>
         <div class="toolbar">
-          <div class="hint">如果当前任务依赖浏览器页面或外部界面信息，先截图一次再发起任务；否则可以直接运行。</div>
-          <button id="runButton">启动闭环任务</button>
+          <div class="hint">分析只会发生在 app.workspace 指定的项目根目录内；新生成的项目默认写到 app.generated_root。如果只是问答或文档模式，不会随便改当前项目。</div>
+          <button id="runButton">提交任务</button>
         </div>
         <div class="inline-result" id="inlineResult">
           <strong>Latest Output</strong>
@@ -594,6 +566,11 @@ const indexHTML = `<!doctype html>
       </section>
 
       <section class="panel span-5">
+        <h2>Project Boundary</h2>
+        <ul class="box-list" id="boundaryList"></ul>
+      </section>
+
+      <section class="panel span-4">
         <h2>System Snapshot</h2>
         <div class="cards">
           <div class="metric"><strong id="providerCount">0</strong><span>Configured Providers</span></div>
@@ -603,16 +580,6 @@ const indexHTML = `<!doctype html>
         <div style="margin-top:14px;" class="muted" id="dockerStatus">loading...</div>
         <div style="margin-top:8px;" class="muted" id="redisStatus">loading...</div>
         <div style="margin-top:8px;" class="muted" id="visionStatus">loading...</div>
-      </section>
-
-      <section class="panel span-4 capture-card">
-        <h2>Screen Context</h2>
-        <img id="capturePreview" class="capture-preview" alt="screen preview">
-        <div class="capture-meta muted" id="captureMeta">尚未捕捉屏幕。点击下方按钮时会请求浏览器共享权限，并只抓取当前这一帧，不会自动轮询。</div>
-        <div class="capture-actions">
-          <button id="captureButton">截图一次</button>
-          <button id="clearCaptureButton" class="secondary" disabled>清空截图</button>
-        </div>
       </section>
 
       <section class="panel span-4">
@@ -627,7 +594,6 @@ const indexHTML = `<!doctype html>
         </div>
         <div class="progress-meter"><div class="progress-fill" id="workflowProgressFill"></div></div>
         <div class="muted" id="workflowProgressText" style="margin-top:8px;">0% · waiting</div>
-        <ul class="bullet-list" id="stepList" style="margin-top:10px;"></ul>
       </section>
 
       <section class="panel span-4">
@@ -644,7 +610,7 @@ const indexHTML = `<!doctype html>
     <section class="result-card" id="resultCard">
       <div class="result-head">
         <div>
-          <h2 style="margin:0;font-size:28px;">Latest Companion Run</h2>
+          <h2 style="margin:0;font-size:28px;">Latest Run</h2>
           <div class="muted" id="resultMeta"></div>
         </div>
         <div class="muted" id="resultLinks"></div>
@@ -655,16 +621,13 @@ const indexHTML = `<!doctype html>
         <ul id="approvalActionList" class="action-list"></ul>
       </div>
       <div class="result-grid">
-        <div class="result-box"><h3>Task Mode</h3><ul id="modeList"></ul></div>
-        <div class="result-box"><h3>Actions</h3><ul id="actionsList"></ul></div>
-        <div class="result-box"><h3>Deliverables</h3><ul id="deliverablesList"></ul></div>
-        <div class="result-box"><h3>Progress Signals</h3><ul id="progressSignalsList"></ul></div>
+        <div class="result-box"><h3>Task Summary</h3><ul id="summaryList"></ul></div>
+        <div class="result-box"><h3>Generated Output</h3><ul id="generatedOutputList"></ul></div>
+        <div class="result-box"><h3>Generated Files</h3><ul id="generatedFilesList"></ul></div>
+        <div class="result-box"><h3>Validation Checks</h3><ul id="validationChecksList"></ul></div>
+        <div class="result-box"><h3>Validation Scope</h3><ul id="validationScopeList"></ul></div>
         <div class="result-box"><h3>Exported Files</h3><ul id="artifactList"></ul></div>
-        <div class="result-box"><h3>Innovations</h3><ul id="innovationsList"></ul></div>
-        <div class="result-box"><h3>RAG Use Cases</h3><ul id="ragList"></ul></div>
-        <div class="result-box"><h3>Current Gaps</h3><ul id="gapsList"></ul></div>
-        <div class="result-box"><h3>Risks</h3><ul id="risksList"></ul></div>
-        <div class="result-box"><h3>Next Steps</h3><ul id="nextStepsList"></ul></div>
+        <div class="result-box"><h3>Execution Steps</h3><ul id="stepList"></ul></div>
         <div class="result-box"><h3>Snapshot</h3><ul id="snapshotList"></ul></div>
         <div class="result-box"><h3>Troubleshooting</h3><ul id="troubleshootList"></ul></div>
       </div>
@@ -676,12 +639,6 @@ const indexHTML = `<!doctype html>
     const runList = document.getElementById("runList");
     const runButton = document.getElementById("runButton");
     const resultCard = document.getElementById("resultCard");
-    const captureButton = document.getElementById("captureButton");
-    const clearCaptureButton = document.getElementById("clearCaptureButton");
-    const capturePreview = document.getElementById("capturePreview");
-    const captureMeta = document.getElementById("captureMeta");
-    const workflowMeta = document.getElementById("workflowMeta");
-    const screenMetaInline = document.getElementById("screenMetaInline");
     const workflowBackendValue = document.getElementById("workflowBackendValue");
     const workflowBadge = document.getElementById("workflowBadge");
     const workflowStatusText = document.getElementById("workflowStatusText");
@@ -689,55 +646,11 @@ const indexHTML = `<!doctype html>
     const workflowMessageText = document.getElementById("workflowMessageText");
     const workflowProgressFill = document.getElementById("workflowProgressFill");
     const workflowProgressText = document.getElementById("workflowProgressText");
-    const stepList = document.getElementById("stepList");
     const manualActionStack = document.getElementById("manualActionStack");
     const inlineResult = document.getElementById("inlineResult");
     const inlineResultText = document.getElementById("inlineResultText");
     const inlineResultMeta = document.getElementById("inlineResultMeta");
     const approvalActionList = document.getElementById("approvalActionList");
-
-    let captureStream = null;
-    let captureBusy = false;
-    const captureVideo = document.createElement("video");
-    captureVideo.muted = true;
-    captureVideo.playsInline = true;
-
-    function renderSimpleList(el, items) {
-      el.innerHTML = "";
-      if (!items || items.length === 0) {
-        const li = document.createElement("li");
-        li.className = "step-item";
-        li.innerHTML = "<span class='muted'>暂无数据</span>";
-        el.appendChild(li);
-        return;
-      }
-      items.forEach(function(item) {
-        const li = document.createElement("li");
-        li.className = "step-item";
-        li.textContent = item;
-        el.appendChild(li);
-      });
-    }
-
-    function renderArtifactList(el, artifacts) {
-      el.innerHTML = "";
-      if (!artifacts || artifacts.length === 0) {
-        const li = document.createElement("li");
-        li.className = "step-item";
-        li.innerHTML = "<span class='muted'>暂无导出文件</span>";
-        el.appendChild(li);
-        return;
-      }
-      artifacts.forEach(function(item) {
-        const li = document.createElement("li");
-        li.className = "step-item";
-        const link = item.url
-          ? "<a href='" + escapeHTML(item.url) + "' target='_blank'>" + escapeHTML(item.name) + "</a>"
-          : escapeHTML(item.name);
-        li.innerHTML = "<span>" + link + " · " + escapeHTML(item.summary || "") + "</span>";
-        el.appendChild(li);
-      });
-    }
 
     function escapeHTML(value) {
       return String(value || "")
@@ -748,79 +661,215 @@ const indexHTML = `<!doctype html>
         .replace(/'/g, "&#39;");
     }
 
-    function setCaptureBusy(active) {
-      captureBusy = active;
-      captureButton.disabled = active;
-      captureButton.textContent = active ? "截图中..." : "截图一次";
+    function statusClass(status) {
+      const value = String(status || "idle").toLowerCase();
+      if (value === "completed" || value === "passed" || value === "ready") return "status-completed";
+      if (value === "failed" || value === "error" || value === "down") return "status-failed";
+      if (value === "running") return "status-running";
+      if (value === "skipped") return "status-skipped";
+      return "status-idle";
     }
 
-    function setClearCaptureEnabled(enabled) {
-      clearCaptureButton.disabled = !enabled;
-    }
-
-    function releaseCaptureStream() {
-      if (!captureStream) {
+    function renderEntries(el, items, emptyText) {
+      el.innerHTML = "";
+      if (!items || items.length === 0) {
+        const li = document.createElement("li");
+        li.innerHTML = "<span class='muted'>" + escapeHTML(emptyText || "暂无数据") + "</span>";
+        el.appendChild(li);
         return;
       }
-      captureStream.getTracks().forEach(function(track) {
-        track.stop();
+      items.forEach(function(item) {
+        const li = document.createElement("li");
+        li.innerHTML = item;
+        el.appendChild(li);
       });
-      captureStream = null;
-      captureVideo.pause();
-      captureVideo.srcObject = null;
     }
 
-    function renderResult(run, options) {
-      if (!run) return;
-      const plan = run.plan || {};
-      const mode = plan.mode || "general";
-      const overview = plan.overview || "本次运行已完成，但没有返回结构化摘要，请打开 Markdown 或 JSON 查看详情。";
-      const actions = Array.isArray(plan.actions) ? plan.actions : [];
-      const deliverables = Array.isArray(plan.deliverables) ? plan.deliverables : [];
-      const progressSignals = Array.isArray(plan.progress_signals) ? plan.progress_signals : [];
-      const innovations = Array.isArray(plan.innovations) ? plan.innovations : [];
-      const ragUseCases = Array.isArray(plan.rag_use_cases) ? plan.rag_use_cases : [];
-      const gaps = Array.isArray(plan.desktop_pet_gaps) ? plan.desktop_pet_gaps : [];
-      const risks = Array.isArray(plan.risks) ? plan.risks : [];
-      const nextSteps = Array.isArray(plan.next_steps) ? plan.next_steps : [];
+    function renderBoundary(state) {
+      document.getElementById("projectRootValue").textContent = state.project_root || state.workspace || "n/a";
+      document.getElementById("generatedRootValue").textContent = state.generated_root || "n/a";
+      document.getElementById("boundaryMeta").textContent =
+        "include " + (state.analysis_scope || []).length + " 项 / exclude " + (state.excluded_names || []).length + " 项";
+      renderEntries(document.getElementById("boundaryList"), [
+        "<strong>分析项目根目录</strong><div class='muted mono'>" + escapeHTML(state.project_root || state.workspace || "n/a") + "</div>",
+        "<strong>生成输出目录</strong><div class='muted mono'>" + escapeHTML(state.generated_root || "n/a") + "</div>",
+        "<strong>纳入上下文的范围</strong><div class='muted'>" + escapeHTML((state.analysis_scope || []).join("、") || "未配置") + "</div>",
+        "<strong>默认忽略目录</strong><div class='muted'>" + escapeHTML((state.excluded_names || []).join("、") || "无") + "</div>"
+      ], "暂无边界配置");
+    }
 
-      resultCard.classList.add("visible");
-      document.getElementById("overviewText").textContent = overview;
-      document.getElementById("resultMeta").textContent =
-        "Provider: " + run.used_provider + " | Mode: " + mode + " | Complexity: " + run.complexity.level + " (" + run.complexity.score + ")";
-      const artifactLinks = Array.isArray(run.artifacts) ? run.artifacts.map(function(item) {
-        return "<a href='" + item.url + "' target='_blank'>" + escapeHTML(item.name) + "</a>";
-      }) : [];
-      document.getElementById("resultLinks").innerHTML =
-        "<a href='" + run.markdown_url + "' target='_blank'>Markdown</a> · <a href='" + run.json_url + "' target='_blank'>JSON</a>" +
-        (artifactLinks.length > 0 ? " · " + artifactLinks.join(" · ") : "");
-      inlineResult.classList.add("visible");
-      inlineResultText.textContent = overview;
-      inlineResultMeta.innerHTML =
-        "Provider: " + escapeHTML(run.used_provider) +
-        " · Mode: " + escapeHTML(mode) +
-        " · Complexity: " + escapeHTML(run.complexity.level) +
-        " · <a href='" + run.markdown_url + "' target='_blank'>Markdown</a> · <a href='" + run.json_url + "' target='_blank'>JSON</a>";
-      renderApprovalActions(run);
-      renderSimpleList(document.getElementById("modeList"), ["任务模式: " + mode]);
-      renderSimpleList(document.getElementById("actionsList"), actions);
-      renderSimpleList(document.getElementById("deliverablesList"), deliverables);
-      renderSimpleList(document.getElementById("progressSignalsList"), progressSignals);
-      renderArtifactList(document.getElementById("artifactList"), run.artifacts);
-      renderSimpleList(document.getElementById("innovationsList"), innovations);
-      renderSimpleList(document.getElementById("ragList"), ragUseCases);
-      renderSimpleList(document.getElementById("gapsList"), gaps);
-      renderSimpleList(document.getElementById("risksList"), risks);
-      renderSimpleList(document.getElementById("nextStepsList"), nextSteps);
-      renderSimpleList(document.getElementById("snapshotList"), buildSnapshotItems(run.snapshot));
-      renderSimpleList(document.getElementById("troubleshootList"), buildTroubleshootItems(run.troubleshoot));
-      renderSteps(run.steps || []);
+    function renderWorkflow(workflow) {
+      if (!workflow) return;
+      const status = workflow.status || "idle";
+      const progress = inferWorkflowProgress(status, workflow.phase || "ready");
+      workflowBadge.className = "status " + statusClass(status);
+      workflowBadge.textContent = status;
+      workflowStatusText.textContent = status;
+      workflowPhaseText.textContent = workflow.phase || "ready";
+      workflowMessageText.textContent = workflow.message || "工作台就绪，等待任务";
+      workflowProgressFill.style.width = progress + "%";
+      workflowProgressText.textContent = progress + "% · " + (workflow.phase || "ready");
+    }
 
-      if (options && options.focus) {
-        window.setTimeout(function() {
-          resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
-        }, 60);
+    function inferWorkflowProgress(status, phase) {
+      if (status === "error") return 100;
+      if (status !== "running") return 0;
+      switch (phase) {
+        case "snapshot": return 12;
+        case "context": return 28;
+        case "planning": return 52;
+        case "codegen": return 66;
+        case "sandbox": return 78;
+        case "preflight": return 88;
+        case "persisting": return 96;
+        default: return 18;
       }
+    }
+
+    function buildResultLinks(run) {
+      const links = [
+        "<a href='" + escapeHTML(run.markdown_url) + "' target='_blank'>Markdown</a>",
+        "<a href='" + escapeHTML(run.json_url) + "' target='_blank'>JSON</a>"
+      ];
+      (run.artifacts || []).forEach(function(item) {
+        if (item.url) {
+          links.push("<a href='" + escapeHTML(item.url) + "' target='_blank'>" + escapeHTML(item.name) + "</a>");
+        }
+      });
+      return links.join(" · ");
+    }
+
+    function buildSummaryItems(run) {
+      const plan = run.plan || {};
+      const items = [
+        "<strong>任务模式</strong><div class='muted'>" + escapeHTML(plan.mode || "general") + "</div>"
+      ];
+      if ((plan.actions || []).length > 0) {
+        items.push("<strong>执行动作</strong><div class='muted'>" + escapeHTML(plan.actions.join("；")) + "</div>");
+      }
+      if ((plan.deliverables || []).length > 0) {
+        items.push("<strong>交付物</strong><div class='muted'>" + escapeHTML(plan.deliverables.join("、")) + "</div>");
+      }
+      if ((plan.progress_signals || []).length > 0) {
+        items.push("<strong>进度信号</strong><div class='muted'>" + escapeHTML(plan.progress_signals.join("；")) + "</div>");
+      }
+      return items;
+    }
+
+    function buildGeneratedOutputItems(run) {
+      const codegen = run.codegen || {};
+      const items = [
+        "<strong>代码生成状态</strong><div class='muted'>" + escapeHTML(codegen.status || "not-run") + " · " + escapeHTML(codegen.summary || "本次未生成代码") + "</div>",
+        "<strong>目标模式</strong><div class='muted'>" + escapeHTML(codegen.target_mode || "analysis-only") + "</div>"
+      ];
+      if (codegen.output_dir) {
+        items.push("<strong>输出目录</strong><div class='muted mono'>" + escapeHTML(codegen.output_dir) + "</div>");
+      }
+      if ((codegen.run_commands || []).length > 0) {
+        items.push("<strong>建议运行命令</strong><div class='muted mono'>" + escapeHTML(codegen.run_commands.join("\n")) + "</div>");
+      }
+      if ((codegen.notes || []).length > 0) {
+        items.push("<strong>备注</strong><div class='muted'>" + escapeHTML(codegen.notes.join("；")) + "</div>");
+      }
+      return items;
+    }
+
+    function buildGeneratedFileItems(run) {
+      const codegen = run.codegen || {};
+      const files = Array.isArray(codegen.files) ? codegen.files : [];
+      if (files.length === 0) {
+        return ["<span class='muted'>本次运行没有写出代码文件；如果只是问答或文档模式，这是正常结果。</span>"];
+      }
+      return files.map(function(file) {
+        const label = file.url
+          ? "<a href='" + escapeHTML(file.url) + "' target='_blank'>" + escapeHTML(file.path) + "</a>"
+          : escapeHTML(file.path);
+        const meta = [];
+        if (file.language) meta.push(file.language);
+        if (file.bytes) meta.push(file.bytes + " bytes");
+        if (file.purpose) meta.push(file.purpose);
+        return "<strong>" + label + "</strong><div class='muted'>" + escapeHTML(meta.join(" · ")) + "</div>";
+      });
+    }
+
+    function buildValidationCheckItems(run) {
+      const report = run.preflight || {};
+      const checks = Array.isArray(report.checks) ? report.checks : [];
+      if (checks.length === 0) {
+        return ["<span class='muted'>本次没有预检结果。</span>"];
+      }
+      return checks.map(function(check) {
+        let output = "";
+        if (check.output) {
+          output = "<div class='muted mono' style='margin-top:6px;'>" + escapeHTML(check.output.slice(0, 260)) + "</div>";
+        }
+        return "<strong>" + escapeHTML(check.name) + " <span class='status " + statusClass(check.status) + "'>" + escapeHTML(check.status) + "</span></strong><div class='muted'>" + escapeHTML(check.summary || "") + "</div>" + output;
+      });
+    }
+
+    function buildValidationScopeItems(run) {
+      const items = [
+        "<strong>Workflow Backend</strong><div class='muted'>" + escapeHTML(run.workflow_backend || "builtin") + "</div>"
+      ];
+      const targets = Array.isArray(run.validation_targets) ? run.validation_targets : [];
+      items.push("<strong>验证范围</strong><div class='muted'>" + escapeHTML(targets.length > 0 ? targets.join("、") : "./...") + "</div>");
+      if (run.workflow_trace && Array.isArray(run.workflow_trace.nodes) && run.workflow_trace.nodes.length > 0) {
+        const trace = run.workflow_trace.nodes.map(function(node) {
+          return node.name + ":" + node.status;
+        }).join(" → ");
+        items.push("<strong>阶段轨迹</strong><div class='muted'>" + escapeHTML(trace) + "</div>");
+      }
+      return items;
+    }
+
+    function buildArtifactItems(run) {
+      const artifacts = Array.isArray(run.artifacts) ? run.artifacts : [];
+      if (artifacts.length === 0) {
+        return ["<span class='muted'>暂无导出文件。</span>"];
+      }
+      return artifacts.map(function(item) {
+        const name = item.url
+          ? "<a href='" + escapeHTML(item.url) + "' target='_blank'>" + escapeHTML(item.name) + "</a>"
+          : escapeHTML(item.name);
+        return "<strong>" + name + "</strong><div class='muted'>" + escapeHTML(item.summary || "") + "</div>";
+      });
+    }
+
+    function buildStepItems(run) {
+      const steps = Array.isArray(run.steps) ? run.steps : [];
+      if (steps.length === 0) {
+        return ["<span class='muted'>当前没有执行步骤。</span>"];
+      }
+      return steps.map(function(step) {
+        return "<strong>" + escapeHTML(step.name) + " <span class='status " + statusClass(step.status) + "'>" + escapeHTML(step.status) + "</span></strong><div class='muted'>" + escapeHTML(step.summary || "") + "</div>";
+      });
+    }
+
+    function buildSnapshotItems(snapshot) {
+      if (!snapshot || !snapshot.enabled) {
+        return ["<span class='muted'>快照未启用。</span>"];
+      }
+      const items = [
+        "<strong>变更文件数</strong><div class='muted'>" + escapeHTML(String(snapshot.changed_files || 0)) + "</div>"
+      ];
+      if (snapshot.before_path) items.push("<strong>Before</strong><div class='muted mono'>" + escapeHTML(snapshot.before_path) + "</div>");
+      if (snapshot.after_path) items.push("<strong>After</strong><div class='muted mono'>" + escapeHTML(snapshot.after_path) + "</div>");
+      if (snapshot.rollback_advice) items.push("<strong>回滚建议</strong><div class='muted'>" + escapeHTML(snapshot.rollback_advice) + "</div>");
+      return items;
+    }
+
+    function buildTroubleshootItems(report) {
+      if (!report) {
+        return ["<span class='muted'>暂无排障报告。</span>"];
+      }
+      const items = ["<strong>状态</strong><div class='muted'>" + escapeHTML(report.status || "unknown") + "</div>"];
+      (report.issues || []).forEach(function(item) {
+        items.push("<strong>问题</strong><div class='muted'>" + escapeHTML(item) + "</div>");
+      });
+      (report.recommendations || []).forEach(function(item) {
+        items.push("<strong>建议</strong><div class='muted'>" + escapeHTML(item) + "</div>");
+      });
+      return items;
     }
 
     function renderApprovalActions(run) {
@@ -831,13 +880,11 @@ const indexHTML = `<!doctype html>
         return;
       }
       manualActionStack.style.display = "block";
-
       actions.forEach(function(action) {
         const li = document.createElement("li");
         li.className = "action-item";
-
         const commandLine = action.command
-          ? "<div class='muted' style='margin-top:6px;'><code>" + escapeHTML(action.command) + "</code></div>"
+          ? "<div class='muted mono' style='margin-top:6px;'>" + escapeHTML(action.command) + "</div>"
           : "";
         const outputBlock = action.output
           ? "<div class='action-output'>" + escapeHTML(action.output) + "</div>"
@@ -845,151 +892,63 @@ const indexHTML = `<!doctype html>
         const executedLine = action.last_executed_at
           ? "<div class='muted' style='margin-top:6px;'>上次执行: " + new Date(action.last_executed_at).toLocaleString() + "</div>"
           : "";
-        const buttonLabel = action.status === "completed"
-          ? "再次执行"
-          : (action.requires_approval ? "执行修复" : "立即执行");
-        const actionHint = action.requires_approval
-          ? "<div class='muted' style='margin-top:6px;'>这会修改当前工作区或触发额外执行，因此保留人工触发。</div>"
-          : "";
         const disabled = action.status === "running" ? "disabled" : "";
-
         li.innerHTML =
           "<div class='action-row'>" +
             "<div class='action-copy'>" +
               "<strong>" + escapeHTML(action.title) + "</strong>" +
               "<div class='muted'>" + escapeHTML(action.summary) + "</div>" +
-              actionHint +
               commandLine +
               executedLine +
             "</div>" +
             "<div class='action-controls'>" +
-              "<span class='status status-" + escapeHTML(action.status || "waiting") + "'>" + escapeHTML(action.status || "pending") + "</span>" +
-              "<button class='secondary action-trigger' data-run-id='" + escapeHTML(run.id) + "' data-action-id='" + escapeHTML(action.id) + "' " + disabled + ">" + buttonLabel + "</button>" +
+              "<span class='status " + statusClass(action.status || "pending") + "'>" + escapeHTML(action.status || "pending") + "</span>" +
+              "<button class='secondary action-trigger' data-run-id='" + escapeHTML(run.id) + "' data-action-id='" + escapeHTML(action.id) + "' " + disabled + ">执行修复</button>" +
             "</div>" +
           "</div>" +
           outputBlock;
-
         approvalActionList.appendChild(li);
       });
     }
 
-    function buildSnapshotItems(snapshot) {
-      if (!snapshot || !snapshot.enabled) {
-        return ["快照未启用"];
-      }
-      const items = [];
-      items.push("变更文件数: " + (snapshot.changed_files || 0));
-      if (snapshot.before_path) items.push("Before: " + snapshot.before_path);
-      if (snapshot.after_path) items.push("After: " + snapshot.after_path);
-      if (snapshot.rollback_advice) items.push(snapshot.rollback_advice);
-      return items;
-    }
-
-    function buildTroubleshootItems(report) {
-      if (!report) {
-        return ["暂无排障报告"];
-      }
-      const items = ["状态: " + (report.status || "unknown")];
-      (report.issues || []).forEach(function(item) { items.push("问题: " + item); });
-      (report.recommendations || []).forEach(function(item) { items.push("建议: " + item); });
-      return items;
-    }
-
-    function renderSteps(steps) {
-      stepList.innerHTML = "";
-      if (!steps || steps.length === 0) {
-        stepList.innerHTML = "<li class='step-item'><span class='muted'>当前没有执行步骤。</span></li>";
-        return;
-      }
-      steps.forEach(function(step) {
-        const badgeClass = "status status-" + step.status;
-        const li = document.createElement("li");
-        li.className = "step-item";
-        li.innerHTML =
-          "<div>" +
-            "<strong>" + step.name + "</strong>" +
-            "<div class='muted'>" + step.summary + "</div>" +
-          "</div>" +
-          "<span class='" + badgeClass + "'>" + step.status + "</span>";
-        stepList.appendChild(li);
-      });
-    }
-
-    function renderScreen(screen) {
-      if (screen && screen.available && screen.image_url) {
-        capturePreview.src = screen.image_url + "?t=" + Date.now();
-        let metaText =
-          "来源: " + (screen.source_label || "shared-screen") +
-          " | 分辨率: " + screen.width + "x" + screen.height +
-          " | 已捕捉: " + screen.capture_count + " 帧";
-        if (screen.analysis_status) {
-          metaText += " | 分析: " + screen.analysis_status;
-        }
-        if (screen.app_hint) {
-          metaText += "\n应用猜测: " + screen.app_hint;
-        }
-        if (screen.vision_summary) {
-          metaText += "\n视觉摘要: " + screen.vision_summary;
-        }
-        if (screen.ocr_text) {
-          metaText += "\nOCR: " + screen.ocr_text.slice(0, 180);
-        }
-        captureMeta.textContent = metaText;
-        screenMetaInline.textContent = "最近屏幕帧: " + (screen.source_label || "shared-screen");
-        setClearCaptureEnabled(true);
-      } else {
-        capturePreview.removeAttribute("src");
-        captureMeta.textContent = "尚未捕捉屏幕。点击下方按钮时会请求浏览器共享权限，并只抓取当前这一帧，不会自动轮询。";
-        screenMetaInline.textContent = "等待屏幕授权";
-        setClearCaptureEnabled(false);
-      }
-    }
-
-    function renderWorkflow(workflow) {
-      if (!workflow) {
-        return;
-      }
-      const status = workflow.status || "idle";
-      const progress = inferWorkflowProgress(status, workflow.phase || "ready");
-      workflowBadge.className = "status status-" + status;
-      workflowBadge.textContent = status;
-      workflowStatusText.textContent = status;
-      workflowPhaseText.textContent = workflow.phase || "ready";
-      workflowMessageText.textContent = workflow.message || "工作台就绪，等待任务";
-      workflowMeta.textContent = workflow.phase + " · " + workflow.message;
-      workflowProgressFill.style.width = progress + "%";
-      workflowProgressText.textContent = progress + "% · " + (workflow.phase || "ready");
-    }
-
-    function inferWorkflowProgress(status, phase) {
-      if (status === "capturing") return 10;
-      if (status === "error") return 100;
-      if (status !== "running") return 0;
-      switch (phase) {
-        case "snapshot":
-          return 12;
-        case "context":
-          return 28;
-        case "planning":
-          return 56;
-        case "sandbox":
-          return 70;
-        case "preflight":
-          return 84;
-        case "persisting":
-          return 96;
-        case "approval-action":
-          return 75;
-        default:
-          return 18;
+    function renderResult(run, options) {
+      if (!run) return;
+      const plan = run.plan || {};
+      const mode = plan.mode || "general";
+      const overview = plan.overview || "本次运行已完成，但没有返回结构化摘要，请打开 Markdown 或 JSON 查看详情。";
+      resultCard.classList.add("visible");
+      document.getElementById("overviewText").textContent = overview;
+      document.getElementById("resultMeta").textContent =
+        "Provider: " + run.used_provider + " | Mode: " + mode + " | Complexity: " + run.complexity.level + " (" + run.complexity.score + ")";
+      document.getElementById("resultLinks").innerHTML = buildResultLinks(run);
+      inlineResult.classList.add("visible");
+      inlineResultText.textContent = overview;
+      inlineResultMeta.innerHTML =
+        "Provider: " + escapeHTML(run.used_provider) +
+        " · Mode: " + escapeHTML(mode) +
+        " · Complexity: " + escapeHTML(run.complexity.level) +
+        " · <a href='" + escapeHTML(run.markdown_url) + "' target='_blank'>Markdown</a> · <a href='" + escapeHTML(run.json_url) + "' target='_blank'>JSON</a>";
+      renderApprovalActions(run);
+      renderEntries(document.getElementById("summaryList"), buildSummaryItems(run), "暂无任务摘要");
+      renderEntries(document.getElementById("generatedOutputList"), buildGeneratedOutputItems(run), "暂无生成信息");
+      renderEntries(document.getElementById("generatedFilesList"), buildGeneratedFileItems(run), "暂无生成文件");
+      renderEntries(document.getElementById("validationChecksList"), buildValidationCheckItems(run), "暂无预检结果");
+      renderEntries(document.getElementById("validationScopeList"), buildValidationScopeItems(run), "暂无验证范围");
+      renderEntries(document.getElementById("artifactList"), buildArtifactItems(run), "暂无导出文件");
+      renderEntries(document.getElementById("stepList"), buildStepItems(run), "暂无执行步骤");
+      renderEntries(document.getElementById("snapshotList"), buildSnapshotItems(run.snapshot), "暂无快照");
+      renderEntries(document.getElementById("troubleshootList"), buildTroubleshootItems(run.troubleshoot), "暂无排障信息");
+      if (options && options.focus) {
+        window.setTimeout(function() {
+          resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 60);
       }
     }
 
     async function loadState() {
       const res = await fetch("/api/state");
       const state = await res.json();
-
-      document.getElementById("workspaceValue").textContent = state.workspace;
+      renderBoundary(state);
       document.getElementById("providerCount").textContent = state.providers.length;
       document.getElementById("symbolCount").textContent = state.symbols.function_count + state.symbols.struct_count;
       document.getElementById("knowledgeCount").textContent = state.knowledge.chunk_count;
@@ -1002,138 +961,51 @@ const indexHTML = `<!doctype html>
       state.providers.forEach(function(provider) {
         const li = document.createElement("li");
         li.className = "provider-item";
-        const statusClass = provider.ready ? "ready" : "down";
         const statusText = provider.ready ? "ready" : "down";
         li.innerHTML =
           "<div>" +
-            "<strong>" + provider.name + "</strong>" +
-            "<div class='muted'>" + (provider.default_model || "n/a") + "</div>" +
-            "<div class='muted'>" + provider.reason + "</div>" +
+            "<strong>" + escapeHTML(provider.name) + "</strong>" +
+            "<div class='muted'>" + escapeHTML(provider.default_model || "n/a") + "</div>" +
+            "<div class='muted'>" + escapeHTML(provider.reason || "") + "</div>" +
           "</div>" +
-          "<span class='status " + statusClass + "'>" + statusText + "</span>";
+          "<span class='status " + statusClass(statusText) + "'>" + statusText + "</span>";
         providerList.appendChild(li);
       });
 
       runList.innerHTML = "";
       if (!state.recent_runs || state.recent_runs.length === 0) {
-        runList.innerHTML = "<li class='run-item'><span class='muted'>还没有运行记录。授权屏幕后发起一次任务，这里就会形成完整闭环记录。</span></li>";
+        runList.innerHTML = "<li class='run-item'><span class='muted'>还没有运行记录。提交一次任务后，这里会显示最近的报告和生成结果。</span></li>";
       } else {
         state.recent_runs.forEach(function(run) {
           const li = document.createElement("li");
           li.className = "run-item";
           li.innerHTML =
             "<div>" +
-              "<strong>" + run.goal + "</strong>" +
-              "<div class='muted'>" + new Date(run.created_at).toLocaleString() + " · " + run.used_provider + " · " + run.complexity.level + "</div>" +
+              "<strong>" + escapeHTML(run.goal) + "</strong>" +
+              "<div class='muted'>" + new Date(run.created_at).toLocaleString() + " · " + escapeHTML(run.used_provider) + " · " + escapeHTML(run.complexity.level) + "</div>" +
             "</div>" +
-            "<a href='" + run.markdown_url + "' target='_blank'>Report</a>";
+            "<a href='" + escapeHTML(run.markdown_url) + "' target='_blank'>Report</a>";
           runList.appendChild(li);
         });
       }
 
-      renderScreen(state.screen);
       renderWorkflow(state.workflow);
       renderResult(state.latest_run, { focus: false });
     }
 
-    async function uploadCaptureFrame() {
-      if (!captureStream) {
-        return;
-      }
-
-      try {
-        const track = captureStream.getVideoTracks()[0];
-        if (!track) {
-          return;
-        }
-
-        const nativeWidth = captureVideo.videoWidth || 1280;
-        const nativeHeight = captureVideo.videoHeight || 720;
-        const maxWidth = 1280;
-        const ratio = nativeWidth > maxWidth ? (maxWidth / nativeWidth) : 1;
-        const width = Math.max(320, Math.round(nativeWidth * ratio));
-        const height = Math.max(180, Math.round(nativeHeight * ratio));
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(captureVideo, 0, 0, width, height);
-        const dataURL = canvas.toDataURL("image/jpeg", 0.76);
-        capturePreview.src = dataURL;
-
-        const res = await fetch("/api/capture/frame", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            data_url: dataURL,
-            width: nativeWidth,
-            height: nativeHeight,
-            source_label: track.label || "shared-screen"
-          })
-        });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-
-        const screen = await res.json();
-        renderScreen(screen);
-      } catch (err) {
-        captureMeta.textContent = "屏幕捕捉失败: " + err.message;
-      }
-    }
-
-    async function startCapture() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-        alert("当前浏览器不支持屏幕捕捉 API");
-        return;
-      }
-      if (captureBusy) {
-        return;
-      }
-
-      setCaptureBusy(true);
-      try {
-        releaseCaptureStream();
-        captureStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: 1 },
-          audio: false
-        });
-        captureVideo.srcObject = captureStream;
-        await captureVideo.play();
-        await uploadCaptureFrame();
-      } catch (err) {
-        alert("开启屏幕捕捉失败: " + err.message);
-      } finally {
-        releaseCaptureStream();
-        setCaptureBusy(false);
-      }
-    }
-
-    async function clearCapture() {
-      clearCaptureButton.disabled = true;
-      try {
-        const res = await fetch("/api/capture/clear", {
-          method: "POST"
-        });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-        const screen = await res.json();
-        renderScreen(screen);
-      } catch (err) {
-        alert("清空截图失败: " + err.message);
-        setClearCaptureEnabled(true);
-      }
-    }
-
     runButton.addEventListener("click", async function() {
+      const goal = document.getElementById("goalInput").value.trim();
+      if (!goal) {
+        alert("请输入任务目标");
+        return;
+      }
       runButton.disabled = true;
-      runButton.textContent = "闭环执行中...";
+      runButton.textContent = "执行中...";
       try {
         const res = await fetch("/api/run", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ goal: document.getElementById("goalInput").value.trim() })
+          body: JSON.stringify({ goal: goal })
         });
         if (!res.ok) {
           throw new Error(await res.text());
@@ -1145,21 +1017,17 @@ const indexHTML = `<!doctype html>
         alert("执行失败: " + err.message);
       } finally {
         runButton.disabled = false;
-        runButton.textContent = "启动闭环任务";
+        runButton.textContent = "提交任务";
       }
     });
 
     approvalActionList.addEventListener("click", async function(event) {
       const button = event.target.closest(".action-trigger");
-      if (!button) {
-        return;
-      }
-
+      if (!button) return;
       const runId = button.getAttribute("data-run-id");
       const actionId = button.getAttribute("data-action-id");
       button.disabled = true;
       button.textContent = "执行中...";
-
       try {
         const res = await fetch("/api/action/execute", {
           method: "POST",
@@ -1169,23 +1037,19 @@ const indexHTML = `<!doctype html>
         if (!res.ok) {
           throw new Error(await res.text());
         }
-
         const run = await res.json();
         renderResult(run, { focus: true });
         await loadState();
       } catch (err) {
-        alert("审批动作执行失败: " + err.message);
+        alert("执行修复失败: " + err.message);
       } finally {
         button.disabled = false;
         button.textContent = "执行修复";
       }
     });
 
-    captureButton.addEventListener("click", startCapture);
-    clearCaptureButton.addEventListener("click", clearCapture);
-
     loadState().catch(function(err) {
-      document.getElementById("workspaceValue").textContent = "state load failed: " + err.message;
+      document.getElementById("projectRootValue").textContent = "state load failed: " + err.message;
     });
     window.setInterval(function() {
       loadState().catch(function() {});

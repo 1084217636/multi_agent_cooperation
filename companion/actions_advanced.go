@@ -86,6 +86,7 @@ func (s *Service) performAutoFixCommitAction(ctx context.Context, workdir string
 
 func (s *Service) runDockerSelfHeal(workdir string, targets []string) (string, error) {
 	scope := strings.Join(validationArgs(targets), " ")
+	pruneExpr := buildFindPruneExpr(s.projectExcludeNames())
 	script := `
 set -u
 export PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -97,10 +98,10 @@ else
   echo "[self-heal] running go mod tidy"
   /usr/local/go/bin/go mod tidy || true
   echo "[self-heal] running gofmt"
-  find . -path './.git' -prune -o -path './data' -prune -o -path './node_modules' -prune -o -name '*.go' -exec /usr/local/go/bin/gofmt -w {} +
+  find . ` + pruneExpr + ` -name '*.go' -exec /usr/local/go/bin/gofmt -w {} +
   if command -v goimports >/dev/null 2>&1; then
     echo "[self-heal] running goimports"
-    find . -path './.git' -prune -o -path './data' -prune -o -path './node_modules' -prune -o -name '*.go' -exec goimports -w {} +
+    find . ` + pruneExpr + ` -name '*.go' -exec goimports -w {} +
   fi
   echo "[self-heal] rerunning go test"
   /usr/local/go/bin/go test ` + scope + ` || exit 1
@@ -123,7 +124,7 @@ func (s *Service) runLocalAutoFix(ctx context.Context, workdir string, targets [
 	var outputParts []string
 	targetArgs := validationArgs(targets)
 
-	goFiles, err := collectGoFiles(workdir)
+	goFiles, err := collectGoFiles(workdir, s.projectExcludeNames())
 	if err != nil {
 		return "", err
 	}
@@ -222,7 +223,15 @@ func (s *Service) runLocalAutoFix(ctx context.Context, workdir string, targets [
 	return strings.Join(outputParts, "\n"), nil
 }
 
-func collectGoFiles(root string) ([]string, error) {
+func collectGoFiles(root string, excludeNames []string) ([]string, error) {
+	excluded := map[string]struct{}{}
+	for _, name := range excludeNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		excluded[name] = struct{}{}
+	}
 	var files []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -230,7 +239,7 @@ func collectGoFiles(root string) ([]string, error) {
 		}
 		if info.IsDir() {
 			name := info.Name()
-			if name == ".git" || name == "data" || name == "node_modules" || name == "bin" || name == "workspace_runs" {
+			if _, ok := excluded[name]; ok {
 				return filepath.SkipDir
 			}
 			return nil
@@ -241,6 +250,21 @@ func collectGoFiles(root string) ([]string, error) {
 		return nil
 	})
 	return files, err
+}
+
+func buildFindPruneExpr(excludeNames []string) string {
+	parts := make([]string, 0, len(excludeNames)+1)
+	for _, name := range excludeNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		parts = append(parts, "-path './"+name+"' -prune -o")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ") + " "
 }
 
 func resolveGofmtPath(ctx context.Context) (string, error) {

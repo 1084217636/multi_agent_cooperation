@@ -56,12 +56,12 @@ func (s *Service) runAutoRepairLoop(ctx context.Context, workdir string, initial
 
 	for roundNumber := 1; roundNumber <= maxRounds; roundNumber++ {
 		started := time.Now()
-		before, _ := snapshot.Capture(workdir, []string{".git", ".vscode", "bin", "node_modules", "data", "accounts", "workspace_runs"})
+		before, _ := snapshot.Capture(workdir, s.projectExcludeNames())
 
 		commands, output := s.runRepairCommands(ctx, workdir, targets)
 		current = preflight.RunWithTargets(ctx, workdir, targets)
 
-		after, _ := snapshot.Capture(workdir, []string{".git", ".vscode", "bin", "node_modules", "data", "accounts", "workspace_runs"})
+		after, _ := snapshot.Capture(workdir, s.projectExcludeNames())
 		diff := snapshot.Compare(before, after)
 		changed := len(diff.Added) + len(diff.Modified) + len(diff.Deleted)
 
@@ -113,7 +113,7 @@ func (s *Service) runRepairCommands(ctx context.Context, workdir string, targets
 	targetArgs := validationArgs(targets)
 	targetLabel := validationScopeLabel(targetArgs)
 
-	goFiles, err := collectGoFiles(workdir)
+	goFiles, err := collectGoFiles(workdir, s.projectExcludeNames())
 	if err != nil {
 		return nil, err.Error()
 	}

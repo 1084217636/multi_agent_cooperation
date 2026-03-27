@@ -176,6 +176,10 @@ type RunDigest struct {
 type DashboardState struct {
 	AppName         string            `json:"app_name"`
 	Workspace       string            `json:"workspace"`
+	ProjectRoot     string            `json:"project_root"`
+	GeneratedRoot   string            `json:"generated_root"`
+	AnalysisScope   []string          `json:"analysis_scope,omitempty"`
+	ExcludedNames   []string          `json:"excluded_names,omitempty"`
 	GeneratedAt     time.Time         `json:"generated_at"`
 	Providers       []ProviderStatus  `json:"providers"`
 	Symbols         SymbolSnapshot    `json:"symbols"`
@@ -214,9 +218,13 @@ type Service struct {
 
 // NewService 创建研发智能体服务。
 func NewService(config *Config, root string) *Service {
+	projectRoot := root
+	if config != nil && strings.TrimSpace(config.App.Workspace) != "" {
+		projectRoot = config.App.Workspace
+	}
 	return &Service{
 		config:    config,
-		root:      root,
+		root:      projectRoot,
 		providers: make(map[string]llm.Provider),
 		statuses:  make(map[string]ProviderStatus),
 		workflow: WorkflowState{
@@ -311,6 +319,10 @@ func (s *Service) State(ctx context.Context) (*DashboardState, error) {
 	state := &DashboardState{
 		AppName:         s.config.App.Name,
 		Workspace:       s.config.App.Workspace,
+		ProjectRoot:     s.projectRoot(),
+		GeneratedRoot:   s.generatedRoot(),
+		AnalysisScope:   s.analysisScopeEntries(),
+		ExcludedNames:   s.projectExcludeNames(),
 		GeneratedAt:     time.Now(),
 		Providers:       providers,
 		Symbols:         s.symbols,
@@ -706,7 +718,7 @@ func (s *Service) initProviders() {
 }
 
 func (s *Service) refreshSymbols() error {
-	inspector := mcp.NewInspector(s.root)
+	inspector := mcp.NewInspector(s.root, s.projectExcludeNames()...)
 	codeInfo, err := inspector.ScanProject()
 	if err != nil {
 		return fmt.Errorf("failed to scan symbols: %w", err)
@@ -760,7 +772,7 @@ func (s *Service) refreshSymbols() error {
 func (s *Service) refreshKnowledge() error {
 	index, err := rag.Build(s.root, rag.Options{
 		IncludePaths:     s.config.Knowledge.IncludePaths,
-		ExcludeNames:     s.config.Knowledge.ExcludeNames,
+		ExcludeNames:     s.projectExcludeNames(),
 		MaxFileSizeBytes: int64(s.config.Knowledge.MaxFileSizeKB) * 1024,
 		ChunkSize:        s.config.Knowledge.ChunkSize,
 	})
@@ -961,7 +973,9 @@ func inferTaskMode(goal string, screen ScreenContext) string {
 		containsAny(lower, "当前项目", "当前仓库", "这个项目", "本项目", "current project", "current repo", "this repo"):
 		return "closed_loop"
 	case containsAny(lower, "新建项目", "生成项目", "脚手架", "项目代码", "创建文件", "生成代码", "实现功能", "搭建") ||
-		(strings.Contains(lower, "生成") && containsAny(lower, "项目", "服务", "接口", "代码", "模块", "http")):
+		(strings.Contains(lower, "生成") && containsAny(lower, "项目", "服务", "接口", "代码", "模块", "http")) ||
+		(containsAny(lower, "创建", "生成", "实现", "编写", "写一个", "写个", "搭一个") &&
+			containsAny(lower, "go", "函数", "工具包", "包", "模块", "单元测试", "测试", "接口", "服务", "handler")):
 		return "scaffold"
 	case containsAny(lower, "分析", "结构", "页面", "这个页面", "浏览器内容", "讲讲", "介绍", "梳理") && !containsAny(lower, "开发", "实现", "生成代码", "搭建", "闭环", "生成项目"):
 		return "analysis"
@@ -1384,9 +1398,7 @@ func (s *Service) performRollbackAction(report *RunReport) actionOutcome {
 		}
 	}
 
-	current, err := snapshot.Capture(s.root, []string{
-		".git", ".vscode", "bin", "node_modules", "data", "accounts",
-	})
+	current, err := snapshot.Capture(s.root, s.projectExcludeNames())
 	if err != nil {
 		return actionOutcome{
 			Status:  "failed",
@@ -1874,7 +1886,7 @@ func parsePlanResponse(content, goal string, matches []KnowledgeMatch) Plan {
 
 	var plan Plan
 	if err := json.Unmarshal([]byte(jsonText), &plan); err == nil && plan.Overview != "" {
-		return normalizePlan(plan)
+		return normalizePlanForGoal(goal, plan)
 	}
 
 	return fallbackPlan(goal, matches)
@@ -1892,6 +1904,22 @@ func normalizePlan(plan Plan) Plan {
 	plan.DesktopPetGaps = ensureList(plan.DesktopPetGaps)
 	plan.RAGUseCases = ensureList(plan.RAGUseCases)
 	plan.NextSteps = ensureList(plan.NextSteps)
+	return plan
+}
+
+func normalizePlanForGoal(goal string, plan Plan) Plan {
+	plan = normalizePlan(plan)
+	hintedMode := inferTaskMode(goal, ScreenContext{})
+	switch hintedMode {
+	case "scaffold":
+		if plan.Mode == "document" || plan.Mode == "analysis" || plan.Mode == "general" {
+			plan.Mode = "scaffold"
+		}
+	case "closed_loop":
+		if plan.Mode == "document" || plan.Mode == "analysis" || plan.Mode == "general" || plan.Mode == "scaffold" {
+			plan.Mode = "closed_loop"
+		}
+	}
 	return plan
 }
 
@@ -2248,9 +2276,7 @@ func (s *Service) providerTimeout(level ComplexityLevel, providerName string) ti
 }
 
 func (s *Service) createSnapshot(stage string) (*snapshot.Manifest, string, error) {
-	manifest, err := snapshot.Capture(s.root, []string{
-		".git", ".vscode", "bin", "node_modules", "data", "accounts",
-	})
+	manifest, err := snapshot.Capture(s.root, s.projectExcludeNames())
 	if err != nil {
 		return nil, "", err
 	}

@@ -19,6 +19,7 @@
 - [README.md](/home/root1/go_learn/multi_agent_cooperation/README.md)
 - [PROJECT_TEACHING_GUIDE.md](/home/root1/go_learn/multi_agent_cooperation/PROJECT_TEACHING_GUIDE.md)
 - [TERM_GLOSSARY.md](/home/root1/go_learn/multi_agent_cooperation/TERM_GLOSSARY.md)
+- [AI_BEGINNER_GUIDE.md](/home/root1/go_learn/multi_agent_cooperation/AI_BEGINNER_GUIDE.md)
 
 ## 1. 启动与配置
 
@@ -210,3 +211,4 @@
 读完学习地图后，直接去按功能验收：
 
 - [docs/TESTING_GUIDE.md](/home/root1/go_learn/multi_agent_cooperation/docs/TESTING_GUIDE.md)
+- 如果你准备冲刺面试，再看 [INTERVIEW_PLAYBOOK.md](/home/root1/go_learn/multi_agent_cooperation/INTERVIEW_PLAYBOOK.md) 和 [STUDY_PLAN_14_DAYS.md](/home/root1/go_learn/multi_agent_cooperation/STUDY_PLAN_14_DAYS.md)

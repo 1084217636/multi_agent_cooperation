@@ -79,7 +79,8 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("App: %s\n", state.AppName)
-		fmt.Printf("Workspace: %s\n", state.Workspace)
+		fmt.Printf("Project Root: %s\n", state.ProjectRoot)
+		fmt.Printf("Generated Root: %s\n", state.GeneratedRoot)
 		fmt.Printf("Providers: %d\n", len(state.Providers))
 		fmt.Printf("Symbols: packages=%d structs=%d functions=%d\n", state.Symbols.PackageCount, state.Symbols.StructCount, state.Symbols.FunctionCount)
 		fmt.Printf("Knowledge: files=%d chunks=%d\n", state.Knowledge.FileCount, state.Knowledge.ChunkCount)

@@ -3,6 +3,7 @@ app:
   http_addr: "127.0.0.1:18888"
   data_dir: "data"
   workspace: "."
+  generated_root: "workspace_runs"
   auto_open_browser: true
 
 runtime:

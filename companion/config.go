@@ -18,6 +18,7 @@ type AppConfig struct {
 	HTTPAddr        string `yaml:"http_addr" json:"http_addr"`
 	DataDir         string `yaml:"data_dir" json:"data_dir"`
 	Workspace       string `yaml:"workspace" json:"workspace"`
+	GeneratedRoot   string `yaml:"generated_root" json:"generated_root"`
 	AutoOpenBrowser bool   `yaml:"auto_open_browser" json:"auto_open_browser"`
 }
 
@@ -90,6 +91,7 @@ func DefaultConfig(workdir string) *Config {
 			HTTPAddr:        "127.0.0.1:18888",
 			DataDir:         filepath.Join(workdir, "data"),
 			Workspace:       workdir,
+			GeneratedRoot:   filepath.Join(workdir, "workspace_runs"),
 			AutoOpenBrowser: true,
 		},
 		Runtime: RuntimeConfig{
@@ -239,6 +241,7 @@ func (c *Config) expandEnv() {
 	c.App.HTTPAddr = os.ExpandEnv(c.App.HTTPAddr)
 	c.App.DataDir = os.ExpandEnv(c.App.DataDir)
 	c.App.Workspace = os.ExpandEnv(c.App.Workspace)
+	c.App.GeneratedRoot = os.ExpandEnv(c.App.GeneratedRoot)
 	c.Workflow.LangGraphEndpoint = os.ExpandEnv(c.Workflow.LangGraphEndpoint)
 	c.Redis.URL = os.ExpandEnv(c.Redis.URL)
 	c.Redis.Namespace = os.ExpandEnv(c.Redis.Namespace)
@@ -297,6 +300,12 @@ func (c *Config) resolvePaths(workdir string) {
 
 	if !filepath.IsAbs(c.App.Workspace) {
 		c.App.Workspace = filepath.Join(workdir, c.App.Workspace)
+	}
+	if strings.TrimSpace(c.App.GeneratedRoot) == "" {
+		c.App.GeneratedRoot = filepath.Join(workdir, "workspace_runs")
+	}
+	if !filepath.IsAbs(c.App.GeneratedRoot) {
+		c.App.GeneratedRoot = filepath.Join(workdir, c.App.GeneratedRoot)
 	}
 	if !filepath.IsAbs(c.App.DataDir) {
 		c.App.DataDir = filepath.Join(workdir, c.App.DataDir)

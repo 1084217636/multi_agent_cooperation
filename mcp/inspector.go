@@ -66,12 +66,21 @@ type CallEdgeInfo struct {
 
 // Inspector 负责扫描项目静态结构。
 type Inspector struct {
-	rootDir string
+	rootDir      string
+	excludeNames map[string]struct{}
 }
 
 // NewInspector 创建代码检查器。
-func NewInspector(rootDir string) *Inspector {
-	return &Inspector{rootDir: rootDir}
+func NewInspector(rootDir string, excludeNames ...string) *Inspector {
+	seen := make(map[string]struct{}, len(excludeNames))
+	for _, name := range excludeNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	return &Inspector{rootDir: rootDir, excludeNames: seen}
 }
 
 // ScanProject 扫描项目代码。
@@ -86,8 +95,14 @@ func (i *Inspector) ScanProject() (*CodeInfo, error) {
 			return walkErr
 		}
 
-		if info.IsDir() && strings.HasPrefix(info.Name(), ".") {
-			return filepath.SkipDir
+		if info.IsDir() {
+			name := info.Name()
+			if strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			if _, ok := i.excludeNames[name]; ok {
+				return filepath.SkipDir
+			}
 		}
 
 		if !info.IsDir() && strings.HasSuffix(path, ".go") {

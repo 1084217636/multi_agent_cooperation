@@ -15,6 +15,8 @@
 如果你经常被英文术语卡住，先配合看：
 
 - [TERM_GLOSSARY.md](/home/root1/go_learn/multi_agent_cooperation/TERM_GLOSSARY.md)
+- 如果你是 AI 小白，先看 [AI_BEGINNER_GUIDE.md](/home/root1/go_learn/multi_agent_cooperation/AI_BEGINNER_GUIDE.md)
+- 如果你要准备面试，配合看 [INTERVIEW_PLAYBOOK.md](/home/root1/go_learn/multi_agent_cooperation/INTERVIEW_PLAYBOOK.md)
 
 ---
 
