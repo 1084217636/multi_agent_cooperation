@@ -20,7 +20,58 @@ providers:
 - `http_addr`：本地桌面工作台监听地址
 - `data_dir`：报告与 JSON 产物目录
 - `workspace`：要索引和扫描的工程目录
+- `generated_root`：新生成项目的独立输出目录
 - `auto_open_browser`：是否自动打开浏览器
+
+## 2.1 项目边界配置
+
+项目边界用于控制系统分析和生成代码的范围，避免污染上下文或误操作。
+
+### `workspace`（分析边界）
+
+- **作用**：定义当前项目的根目录，所有 AST 扫描、RAG 索引、快照生成都以此为边界
+- **配置建议**：
+  - 单体项目：设置为 `"."`（当前目录）
+  - 多模块项目：设置为项目根目录，如 `"/path/to/project"`
+  - 子目录项目：设置为子目录路径，如 `"subproject"`
+- **注意**：此目录内的文件会被符号扫描和索引，排除列表会自动跳过 `workspace_runs` 等生成目录
+
+### `generated_root`（输出边界）
+
+- **作用**：新生成代码的独立存放区，与分析边界分离
+- **配置建议**：
+  - 默认：`"workspace_runs"`（相对于项目根）
+  - 绝对路径：如 `"/tmp/generated"`
+  - 相对路径：如 `"output"` 或 `"generated"`
+- **注意**：每次任务生成会在此目录下创建时间戳子目录，如 `20260327172702/`，包含所有生成文件
+
+### 配置示例
+
+**单体 Go 项目**：
+```yaml
+app:
+  workspace: "."
+  generated_root: "workspace_runs"
+```
+
+**多项目工作区**：
+```yaml
+app:
+  workspace: "/home/user/projects/myapp"
+  generated_root: "/home/user/projects/generated"
+```
+
+**子目录开发**：
+```yaml
+app:
+  workspace: "src"
+  generated_root: "../generated"
+```
+
+通过合理配置这两个边界，可以确保：
+- 分析时不污染生成目录
+- 生成文件独立存放，便于管理
+- 支持不同项目结构的灵活适配
 
 ## 3. `runtime`
 
